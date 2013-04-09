@@ -16,7 +16,7 @@
     <encoding>UTF-8</encoding>
     <scala.version>2.9.3</scala.version>
     <hive.version>0.9.0-csd-8</hive.version>
-    <spark.version>0.8.0-csd-1</spark.version>
+    <spark.version>0.8.0-csd-2</spark.version>
     <cdh.version>4.1.2</cdh.version>
     <java.version>1.5</java.version>
     <hbase.version>0.94.5-csd-23</hbase.version>
@@ -219,7 +219,7 @@
     <dependency>
       <groupId>org.scalatest</groupId>
       <artifactId>scalatest_${scala.version}</artifactId>
-      <version>1.6.1</version>
+      <version>1.9.1</version>
       <scope>test</scope>
     </dependency>
     <dependency>

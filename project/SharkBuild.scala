@@ -27,7 +27,7 @@ object SharkBuild extends Build {
   val HADOOP_VERSION = "0.20.205.0"
 
   // Spark version to build against.
-  val SPARK_VERSION = "0.8.0-csd-1"
+  val SPARK_VERSION = "0.8.0-csd-2"
 
   lazy val root = Project(
     id = "root",
@@ -72,8 +72,8 @@ object SharkBuild extends Build {
       "org.spark-project" %% "spark-repl" % SPARK_VERSION,
       "com.google.guava" % "guava" % "11.0.1",
       "org.apache.hadoop" % "hadoop-core" % HADOOP_VERSION,
-      "it.unimi.dsi" % "fastutil" % "6.4.2",
-      "org.scalatest" %% "scalatest" % "1.6.1" % "test",
+      "it.unimi.dsi" % "fastutil" % "6.4.4",
+      "org.scalatest" %% "scalatest" % "1.9.1" % "test",
       "junit" % "junit" % "4.10" % "test")
 
   ) ++ assemblySettings ++ Seq(test in assembly := {}) ++ Seq(getClassPathTask)
