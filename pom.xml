@@ -5,7 +5,7 @@
   <artifactId>shark</artifactId>
   <packaging>jar</packaging>
   <description>shark</description>
-  <version>0.8.0-candidate-csd-6-SNAPSHOT</version>
+  <version>0.3.0-csd-15-SNAPSHOT</version>
   <name>shark</name>
   <organization>
     <name>edu.berkeley.cs.amplab</name>
@@ -16,7 +16,7 @@
     <encoding>UTF-8</encoding>
     <scala.version>2.9.3</scala.version>
     <hive.version>0.9.0-csd-13</hive.version>
-    <spark.version>0.7.0-csd-3</spark.version>
+    <spark.version>0.7.0-csd-4-SNAPSHOT</spark.version>
     <cdh.version>4.1.2</cdh.version>
     <java.version>1.5</java.version>
     <hbase.version>0.94.5-csd-26</hbase.version>
@@ -339,7 +339,7 @@
           <additionalClasspathElements>
             <additionalClasspathElement>${basedir}/src/test/conf</additionalClasspathElement>
           </additionalClasspathElements>
-          <argLine>${test.jvm.args}</argLine>
+          <argLine>${test.jvm.args}</argLine> 
           <!-- This is necessary so we can run Scala tests even if there are failures here. -->
           <testFailureIgnore>true</testFailureIgnore>
           <enableAssertions>false</enableAssertions>
