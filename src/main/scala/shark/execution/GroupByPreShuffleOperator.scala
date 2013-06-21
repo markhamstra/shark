@@ -32,7 +32,10 @@ import org.apache.hadoop.hive.serde2.objectinspector.{ObjectInspector, ObjectIns
     ObjectInspectorUtils, StructObjectInspector}
 import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspectorUtils.ObjectInspectorCopyOption
 
+import shark.SharkConfVars
+import shark.SharkEnvSlave
 import shark.execution.UnaryOperator
+import shark.execution.cg.CGEvaluatorFactory
 
 
 /**
@@ -40,6 +43,7 @@ import shark.execution.UnaryOperator
  */
 class GroupByPreShuffleOperator extends UnaryOperator[HiveGroupByOperator] {
 
+  @BeanProperty var useCG = true
   @BeanProperty var conf: GroupByDesc = _
   @BeanProperty var minReductionHashAggr: Float = _
   @BeanProperty var numRowsCompareHashAggr: Int = _
@@ -65,13 +69,14 @@ class GroupByPreShuffleOperator extends UnaryOperator[HiveGroupByOperator] {
     conf = hiveOp.getConf()
     minReductionHashAggr = hconf.get(HiveConf.ConfVars.HIVEMAPAGGRHASHMINREDUCTION.varname).toFloat
     numRowsCompareHashAggr = hconf.get(HiveConf.ConfVars.HIVEGROUPBYMAPINTERVAL.varname).toInt
+    useCG = SharkConfVars.getBoolVar(super.hconf, SharkConfVars.EXPR_CG)
   }
 
   override def initializeOnSlave() {
     aggregationEvals = conf.getAggregators.map(_.getGenericUDAFEvaluator).toArray
     aggregationIsDistinct = conf.getAggregators.map(_.getDistinct).toArray
     rowInspector = objectInspector.asInstanceOf[StructObjectInspector]
-    keyFields = conf.getKeys().map(k => ExprNodeEvaluatorFactory.get(k)).toArray
+    keyFields = conf.getKeys().map(k => CGEvaluatorFactory.get(k, useCG)).toArray
     val keyObjectInspectors: Array[ObjectInspector] = keyFields.map(k => k.initialize(rowInspector))
     val currentKeyObjectInspectors = keyObjectInspectors.map { k =>
         ObjectInspectorUtils.getStandardObjectInspector(k, ObjectInspectorCopyOption.WRITABLE)
@@ -79,7 +84,7 @@ class GroupByPreShuffleOperator extends UnaryOperator[HiveGroupByOperator] {
 
     aggregationParameterFields = conf.getAggregators.toArray.map { aggr =>
       aggr.asInstanceOf[AggregationDesc].getParameters.toArray.map { param =>
-        ExprNodeEvaluatorFactory.get(param.asInstanceOf[ExprNodeDesc])
+        CGEvaluatorFactory.get(param.asInstanceOf[ExprNodeDesc], useCG)
       }
     }
     aggregationParameterObjectInspectors = aggregationParameterFields.map { aggr =>
