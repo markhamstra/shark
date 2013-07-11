@@ -15,11 +15,11 @@
     <maven.compiler.target>1.7</maven.compiler.target>
     <encoding>UTF-8</encoding>
     <scala.version>2.9.3</scala.version>
-    <hive.version>0.9.0-csd-17</hive.version>
+    <hive.version>0.9.0-csd-18-SNAPSHOT</hive.version>
     <spark.version>0.8.0-candidate-csd-7-SNAPSHOT</spark.version>
     <cdh.version>4.1.2</cdh.version>
     <java.version>1.5</java.version>
-    <hbase.version>0.94.5-csd-30</hbase.version>
+    <hbase.version>0.94.5-csd-31-SNAPSHOT</hbase.version>
     <jline.version>0.9.94</jline.version>
 
     <deb.pkg.name>shark-${classifier}</deb.pkg.name>
