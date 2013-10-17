@@ -40,6 +40,7 @@ import org.apache.spark.rdd.{RDD, ShuffledRDD}
 import shark.SharkEnv
 import shark.execution._
 import shark.execution.serialization.OperatorSerializationWrapper
+import shark.execution.cg.CGEvaluatorFactory
 
 
 // The final phase of group by.
@@ -123,11 +124,11 @@ class GroupByPostShuffleOperator extends GroupByPreShuffleOperator with HiveTopO
           if (keysfs.size() > 0) {
             val sf = keysfs.get(keysfs.size() - 1)
             if (sf.getFieldObjectInspector().getCategory().equals(ObjectInspector.Category.UNION)) {
-              unionExprEval = ExprNodeEvaluatorFactory.get(
+              unionExprEval = CGEvaluatorFactory.get(
                 new ExprNodeColumnDesc(
                   TypeInfoUtils.getTypeInfoFromObjectInspector(sf.getFieldObjectInspector),
                   keyField.getFieldName + "." + sf.getFieldName, null, false
-                )
+                ), useCG
               )
               unionExprEval.initialize(rowInspector)
             }

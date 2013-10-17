@@ -19,18 +19,18 @@ package shark.execution
 
 import java.nio.ByteBuffer
 import java.util.ArrayList
-
 import scala.collection.JavaConversions._
 import scala.reflect.BeanProperty
-
 import org.apache.commons.codec.binary.Base64
-import org.apache.hadoop.hive.ql.exec.{ExprNodeEvaluator, ExprNodeEvaluatorFactory}
+import org.apache.hadoop.hive.ql.exec.ExprNodeEvaluator
 import org.apache.hadoop.hive.ql.exec.{LateralViewJoinOperator => HiveLateralViewJoinOperator}
 import org.apache.hadoop.hive.ql.plan.SelectDesc
 import org.apache.hadoop.hive.serde2.objectinspector.{ObjectInspector, StructObjectInspector}
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.serializer.{KryoSerializer => SparkKryoSerializer}
+import shark.execution.cg.CGEvaluatorFactory
+import shark.SharkConfVars
 
 
 /**
@@ -46,6 +46,7 @@ class LateralViewJoinOperator extends NaryOperator[HiveLateralViewJoinOperator] 
   @BeanProperty var lvfOIString: String = _
   @BeanProperty var udtfOp: UDTFOperator = _
   @BeanProperty var udtfOIString: String = _
+  @BeanProperty var useCG = true
 
   @transient var eval: Array[ExprNodeEvaluator] = _
   @transient var fieldOis: StructObjectInspector = _
@@ -60,6 +61,7 @@ class LateralViewJoinOperator extends NaryOperator[HiveLateralViewJoinOperator] 
     lvfOp = parentOperators.filter(_.isInstanceOf[SelectOperator]).head.parentOperators.head
       .asInstanceOf[LateralViewForwardOperator]
     lvfOIString = KryoSerializerToString.serialize(lvfOp.objectInspectors)
+    useCG = SharkConfVars.getBoolVar(super.hconf, SharkConfVars.EXPR_CG)
   }
 
   override def initializeOnSlave() {
@@ -69,7 +71,7 @@ class LateralViewJoinOperator extends NaryOperator[HiveLateralViewJoinOperator] 
     // Get eval(), which will return array that needs to be exploded
     // eval doesn't exist when getColList() is null, but this happens only on select *'s,
     // which are not allowed within explode
-    eval = conf.getColList().map(ExprNodeEvaluatorFactory.get(_)).toArray
+    eval = conf.getColList().map(CGEvaluatorFactory.get(_, useCG)).toArray
     eval.foreach(_.initialize(objectInspectors.head))
 
     // Initialize UDTF operator so that we can call explode() later
