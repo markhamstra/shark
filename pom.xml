@@ -218,6 +218,12 @@
       <optional>true</optional>
     </dependency>
     <dependency>
+      <groupId>edu.berkeley.cs.shark</groupId>
+      <artifactId>hive-contrib</artifactId>
+      <version>${hive.version}</version>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
       <groupId>org.tachyonproject</groupId>
       <artifactId>tachyon</artifactId>
       <version>0.3.0-csd-2</version>
@@ -375,6 +381,7 @@
             <TEST_FILE>${shark.test.query.file}</TEST_FILE>
           </environmentVariables>
           <systemPropertyVariables>
+            <shark.expr.cg>true</shark.expr.cg>
             <user.dir>${hive.build.dir}</user.dir>
             <test.silent>false</test.silent>
             <hive.version>${hive.version}</hive.version>
