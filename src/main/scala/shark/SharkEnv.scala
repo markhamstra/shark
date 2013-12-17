@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012 The Regents of The University California. 
+ * Copyright (C) 2012 The Regents of The University California.
  * All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,48 +19,70 @@ package shark
 
 import scala.collection.mutable.{HashMap, HashSet}
 
-import org.apache.hadoop.hive.ql.metadata.Hive
-import org.apache.hadoop.hive.conf.HiveConf
+import org.apache.spark.SparkContext
+import org.apache.spark.rdd.RDD
+import org.apache.spark.scheduler.StatsReportListener
 
-import shark.memstore.CacheManager
-
-import spark.SparkContext
+import shark.api.JavaSharkContext
+import shark.execution.serialization.ShuffleSerializer
+import shark.memstore2.MemoryMetadataManager
+import shark.tachyon.TachyonUtilImpl
 
 
 /** A singleton object for the master program. The slaves should not access this. */
 object SharkEnv extends LogHelper {
 
-  def init() {
+  def init(): SparkContext = {
     if (sc == null) {
       sc = new SparkContext(
-          if (System.getenv("MASTER") == null) "local" else System.getenv("MASTER"),
-          "Shark::" + java.net.InetAddress.getLocalHost.getHostName,
-          System.getenv("SPARK_HOME"),
-          Nil,
-          executorEnvVars)
-    }
-  }
-
-  def initWithSharkContext(jobName: String) {
-    if (sc != null) {
-      sc.stop
-    }
-
-    sc = new SharkContext(
         if (System.getenv("MASTER") == null) "local" else System.getenv("MASTER"),
-        jobName,
+        "Shark::" + java.net.InetAddress.getLocalHost.getHostName,
         System.getenv("SPARK_HOME"),
         Nil,
         executorEnvVars)
+      sc.addSparkListener(new StatsReportListener())
+    }
+    sc
   }
 
-  logInfo("Initializing SharkEnv")
+  def initWithSharkContext(jobName: String, master: String = System.getenv("MASTER"))
+    : SharkContext = {
+    if (sc != null) {
+      sc.stop()
+    }
 
-  System.setProperty("spark.serializer", classOf[spark.KryoSerializer].getName)
-  System.setProperty("spark.kryo.registrator", classOf[KryoRegistrator].getName)
+    sc = new SharkContext(
+      if (master == null) "local" else master,
+      jobName,
+      System.getenv("SPARK_HOME"),
+      Nil,
+      executorEnvVars)
+    sc.addSparkListener(new StatsReportListener())
+    sc.asInstanceOf[SharkContext]
+  }
 
-  // Use Kryo to serialize closures. This is too buggy to be used.
-  //System.setProperty("spark.closure.serializer", "spark.KryoSerializer")
+  def initWithSharkContext(newSc: SharkContext): SharkContext = {
+    if (sc != null) {
+      sc.stop()
+    }
+
+    sc = newSc
+    sc.asInstanceOf[SharkContext]
+  }
+
+  def initWithJavaSharkContext(jobName: String): JavaSharkContext = {
+    new JavaSharkContext(initWithSharkContext(jobName))
+  }
+
+  def initWithJavaSharkContext(jobName: String, master: String): JavaSharkContext = {
+    new JavaSharkContext(initWithSharkContext(jobName, master))
+  }
+
+  def initWithJavaSharkContext(newSc: JavaSharkContext): JavaSharkContext = {
+    new JavaSharkContext(initWithSharkContext(newSc.sharkCtx))
+  }
+
+  logDebug("Initializing SharkEnv")
 
   val executorEnvVars = new HashMap[String, String]
   executorEnvVars.put("SCALA_HOME", getEnv("SCALA_HOME"))
@@ -69,25 +91,51 @@ object SharkEnv extends LogHelper {
   executorEnvVars.put("HADOOP_HOME", getEnv("HADOOP_HOME"))
   executorEnvVars.put("JAVA_HOME", getEnv("JAVA_HOME"))
   executorEnvVars.put("MESOS_NATIVE_LIBRARY", getEnv("MESOS_NATIVE_LIBRARY"))
+  executorEnvVars.put("TACHYON_MASTER", getEnv("TACHYON_MASTER"))
+  executorEnvVars.put("TACHYON_WAREHOUSE_PATH", getEnv("TACHYON_WAREHOUSE_PATH"))
 
+  val activeSessions = new HashSet[String]
+  
   var sc: SparkContext = _
 
-  val cache: CacheManager = new CacheManager
+  val shuffleSerializerName = classOf[ShuffleSerializer].getName
+
+  val memoryMetadataManager = new MemoryMetadataManager
+
+  val tachyonUtil = new TachyonUtilImpl(
+    System.getenv("TACHYON_MASTER"), System.getenv("TACHYON_WAREHOUSE_PATH"))
 
   // The following line turns Kryo serialization debug log on. It is extremely chatty.
   //com.esotericsoftware.minlog.Log.set(com.esotericsoftware.minlog.Log.LEVEL_DEBUG)
 
-  // Keeps track of added JARs and files so that we don't add them twice in
-  // consecutive queries.
+  // Keeps track of added JARs and files so that we don't add them twice in consecutive queries.
   val addedFiles = HashSet[String]()
   val addedJars = HashSet[String]()
 
   /**
-   * Cleans up and shuts down the Shark environments.
-   * Stops the SparkContext and drops cached tables.
-  */
+   * Drops the table associated with 'key'. This method checks for Tachyon tables before
+   * delegating to MemoryMetadataManager#removeTable() for removing the table's entry from the
+   * Shark metastore.
+   *
+   * @param tableName The table that should be dropped from the Shark metastore and from memory
+   *                  storage.
+   */
+  def dropTable(databaseName: String, tableName: String): Option[RDD[_]] = {
+    val tableKey = makeTachyonTableKey(databaseName, tableName)
+    if (SharkEnv.tachyonUtil.tachyonEnabled() && SharkEnv.tachyonUtil.tableExists(tableKey)) {
+      if (SharkEnv.tachyonUtil.dropTable(tableKey)) {
+        logInfo("Table " + tableKey + " was deleted from Tachyon.");
+      } else {
+        logWarning("Failed to remove table " + tableKey + " from Tachyon.");
+      }
+    }
+    memoryMetadataManager.removeTable(databaseName, tableName)
+  }
+
+  /** Cleans up and shuts down the Shark environments. */
   def stop() {
-    logInfo("Shutting down Shark Environment")
+    logDebug("Shutting down Shark Environment")
+    memoryMetadataManager.shutdown()
     // Stop the SparkContext
     if (SharkEnv.sc != null) {
       sc.stop()
@@ -95,18 +143,23 @@ object SharkEnv extends LogHelper {
     }
   }
 
-  def getEnv(variable: String) =
-    if (System.getenv(variable) == null) "" else System.getenv(variable)
+  /** Return the value of an environmental variable as a string. */
+  def getEnv(varname: String) = if (System.getenv(varname) == null) "" else System.getenv(varname)
+
+  /**
+   * Return an identifier for RDDs that back tables stored in Tachyon. The format is
+   * "databaseName.tableName".
+   */
+  def makeTachyonTableKey(databaseName: String, tableName: String): String = {
+    (databaseName + "." + tableName).toLowerCase
+  }
+
 }
 
 
 /** A singleton object for the slaves. */
 object SharkEnvSlave {
-  /**
-   * A lock for various operations in ObjectInspectorFactory. Methods in that
-   * class uses a static objectInspectorCache object to cache the creation of
-   * object inspectors. That object is not thread safe so we wrap all calls to
-   * that object in a synchronized lock on this.
-   */
-  val objectInspectorLock: AnyRef = new Object()
+
+  val tachyonUtil = new TachyonUtilImpl(
+    System.getenv("TACHYON_MASTER"), System.getenv("TACHYON_WAREHOUSE_PATH"))
 }

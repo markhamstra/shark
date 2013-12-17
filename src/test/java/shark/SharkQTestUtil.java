@@ -13,6 +13,8 @@ import org.apache.hadoop.hive.ql.QTestUtil;
 import org.apache.hadoop.hive.ql.exec.Utilities.StreamPrinter;
 import org.apache.hadoop.hive.ql.session.SessionState;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 /**
  * Replaces Hive's QTestUtil class by using the SharkDriver instead of Hive's
  * Driver. Also changes the way comparison is done by forcing a sort and
@@ -21,6 +23,8 @@ import org.apache.hadoop.hive.ql.session.SessionState;
 public class SharkQTestUtil extends QTestUtil {
 
   private static Method maskPatternsMethod;
+
+  static final private Log LOG = LogFactory.getLog(SharkQTestUtil.class.getName());
 
   static {
     try {
@@ -57,6 +61,9 @@ public class SharkQTestUtil extends QTestUtil {
     HiveConf.setVar(conf, HiveConf.ConfVars.HIVE_AUTHENTICATOR_MANAGER,
       "org.apache.hadoop.hive.ql.security.DummyAuthenticator");
 
+    // Set the default min number of map tasks to 1 since that's what most Hive tests expects.
+    conf.setInt("mapred.map.tasks", 1);
+
     CliSessionState ss = new CliSessionState(conf);
     assert(ss != null);
     ss.in = System.in;
@@ -84,7 +91,7 @@ public class SharkQTestUtil extends QTestUtil {
       try {
         ss.initFiles.add(testInitFile.getAbsolutePath());
       } catch (Exception e) {
-        System.out.println("Exceptione is =" + e.getMessage());
+        System.out.println("Exception is =" + e.getMessage());
       }
     }
     cliDrv.processInitFiles(ss);
@@ -92,6 +99,7 @@ public class SharkQTestUtil extends QTestUtil {
 
   @Override
   public int executeClient(String tname) {
+    LOG.info("Begin query: " + tname);
     return cliDrv.processLine(getQMap().get(tname));
   }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012 The Regents of The University California. 
+ * Copyright (C) 2012 The Regents of The University California.
  * All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,15 +17,14 @@
 
 package shark
 
-import java.util.{ArrayList => JavaArrayList, List => JavaList, Date}
+import java.util.{List => JavaList}
 
 import scala.collection.JavaConversions._
 
 import org.apache.hadoop.hive.conf.HiveConf
 import org.apache.hadoop.hive.metastore.api.Schema
-import org.apache.hadoop.hive.ql.{Context, Driver, QueryPlan}
+import org.apache.hadoop.hive.ql.{Driver, QueryPlan}
 import org.apache.hadoop.hive.ql.exec._
-import org.apache.hadoop.hive.ql.exec.OperatorFactory.OpTuple
 import org.apache.hadoop.hive.ql.log.PerfLogger
 import org.apache.hadoop.hive.ql.metadata.AuthorizationException
 import org.apache.hadoop.hive.ql.parse._
@@ -34,9 +33,15 @@ import org.apache.hadoop.hive.ql.session.SessionState
 import org.apache.hadoop.hive.serde2.{SerDe, SerDeUtils}
 import org.apache.hadoop.util.StringUtils
 
-import shark.execution.{SharkExplainTask, SharkExplainWork, SparkTask, SparkWork, TableRDD}
-import shark.memstore.ColumnarSerDe
+import shark.api.TableRDD
+import shark.api.QueryExecutionException
+import shark.execution.{SharkDDLTask, SharkDDLWork}
+import shark.execution.{SharkExplainTask, SharkExplainWork}
+import shark.execution.{SparkLoadWork, SparkLoadTask}
+import shark.execution.{SparkTask, SparkWork}
+import shark.memstore2.ColumnarSerDe
 import shark.parse.{QueryContext, SharkSemanticAnalyzerFactory}
+import shark.util.QueryRewriteUtils
 
 
 /**
@@ -46,23 +51,23 @@ import shark.parse.{QueryContext, SharkSemanticAnalyzerFactory}
  *
  * See below for the SharkDriver class.
  */
-object SharkDriver extends LogHelper {
+private[shark] object SharkDriver extends LogHelper {
 
   // A dummy static method so we can make sure the following static code are executed.
   def runStaticCode() {
-    logInfo("Initializing object SharkDriver")
+    logDebug("Initializing object SharkDriver")
   }
 
   def registerSerDe(serdeClass: Class[_ <: SerDe]) {
     SerDeUtils.registerSerDe(serdeClass.getName, serdeClass)
   }
 
-  registerSerDe(classOf[ColumnarSerDe.Basic])
-  registerSerDe(classOf[ColumnarSerDe.WithStats])
-  registerSerDe(classOf[ColumnarSerDe.Compressed])
+  registerSerDe(classOf[ColumnarSerDe])
 
   // Task factory. Add Shark specific tasks.
   TaskFactory.taskvec.addAll(Seq(
+    new TaskFactory.taskTuple(classOf[SharkDDLWork], classOf[SharkDDLTask]),
+    new TaskFactory.taskTuple(classOf[SparkLoadWork], classOf[SparkLoadTask]),
     new TaskFactory.taskTuple(classOf[SparkWork], classOf[SparkTask]),
     new TaskFactory.taskTuple(classOf[SharkExplainWork], classOf[SharkExplainTask])))
 
@@ -115,7 +120,7 @@ object SharkDriver extends LogHelper {
 /**
  * The driver to execute queries in Shark.
  */
-class SharkDriver(conf: HiveConf) extends Driver(conf) with LogHelper {
+private[shark] class SharkDriver(conf: HiveConf) extends Driver(conf) with LogHelper {
 
   // Helper methods to access the private members made accessible using reflection.
   def plan = getPlan
@@ -142,15 +147,17 @@ class SharkDriver(conf: HiveConf) extends Driver(conf) with LogHelper {
     super.init()
   }
 
-  def tableRdd(cmd:String): TableRDD = {
+  def tableRdd(cmd: String): Option[TableRDD] = {
     useTableRddSink = true
     val response = run(cmd)
+    // Throw an exception if there is an error in query processing.
+    if (response.getResponseCode() != 0) {
+      throw new QueryExecutionException(response.getErrorMessage)
+    }
     useTableRddSink = false
     plan.getRootTasks.get(0) match {
-      case sparkTask: SparkTask => {
-        sparkTask.tableRdd
-      }
-      case _ => null
+      case sparkTask: SparkTask => sparkTask.tableRdd
+      case _ => None
     }
   }
 
@@ -175,9 +182,19 @@ class SharkDriver(conf: HiveConf) extends Driver(conf) with LogHelper {
     saveSession(queryState)
 
     try {
-      val command = new VariableSubstitution().substitute(conf, cmd)
+      val command = {
+        val varSubbedCmd = new VariableSubstitution().substitute(conf, cmd)
+        val cmdInUpperCase = varSubbedCmd.toUpperCase
+        if (cmdInUpperCase.startsWith("CACHE")) {
+          QueryRewriteUtils.cacheToAlterTable(varSubbedCmd)
+        } else if (cmdInUpperCase.startsWith("UNCACHE")) {
+          QueryRewriteUtils.uncacheToAlterTable(varSubbedCmd)
+        } else {
+          varSubbedCmd
+        }
+      }
       context = new QueryContext(conf, useTableRddSink)
-      context.setCmd(cmd)
+      context.setCmd(command)
       context.setTryCount(getTryCount())
 
       val tree = ParseUtils.findRootNonNullToken((new ParseDriver()).parse(command, context))
@@ -197,7 +214,7 @@ class SharkDriver(conf: HiveConf) extends Driver(conf) with LogHelper {
         sem.analyze(tree, context)
       }
 
-      logInfo("Semantic Analysis Completed")
+      logDebug("Semantic Analysis Completed")
 
       sem.validate()
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012 The Regents of The University California. 
+ * Copyright (C) 2012 The Regents of The University California.
  * All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,11 +17,12 @@
 
 package shark.execution
 
-import org.apache.hadoop.hive.ql.exec.{LateralViewForwardOperator => HiveLateralViewForwardOperator}
+import org.apache.hadoop.hive.ql.plan.LateralViewForwardDesc
 
-import spark.RDD
+import org.apache.spark.rdd.RDD
 
-class LateralViewForwardOperator extends UnaryOperator[HiveLateralViewForwardOperator] {
+
+class LateralViewForwardOperator extends UnaryOperator[LateralViewForwardDesc] {
 
   override def execute(): RDD[_] = executeParents().head._2
 

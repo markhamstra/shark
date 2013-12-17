@@ -13,13 +13,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-addSbtPlugin("com.typesafe.sbteclipse" % "sbteclipse-plugin" % "2.0.0")
+addSbtPlugin("org.ensime" % "ensime-sbt-cmd" % "0.1.1")
 
-addSbtPlugin("com.eed3si9n" % "sbt-assembly" % "0.7.3")
+addSbtPlugin("org.scalastyle" %% "scalastyle-sbt-plugin" % "0.3.2")
 
-addSbtPlugin("com.eed3si9n" % "sbt-inspectr" % "0.0.2")
+addSbtPlugin("com.typesafe.sbteclipse" % "sbteclipse-plugin" % "2.2.0")
 
-resolvers += Resolver.url("sbt-plugin-releases",
-          new URL("http://scalasbt.artifactoryonline.com/scalasbt/sbt-plugin-releases/"))(Resolver.ivyStylePatterns)
+addSbtPlugin("com.github.mpeltonen" % "sbt-idea" % "1.4.0")
 
+addSbtPlugin("com.eed3si9n" % "sbt-assembly" % "0.9.2")
 
+resolvers += Resolver.url(
+  "sbt-plugin-releases",
+  new URL("http://scalasbt.artifactoryonline.com/scalasbt/sbt-plugin-releases/"))(Resolver.ivyStylePatterns)
+
+resolvers += "sonatype-releases" at "https://oss.sonatype.org/content/repositories/releases/"

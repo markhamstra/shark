@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012 The Regents of The University California. 
+ * Copyright (C) 2012 The Regents of The University California.
  * All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,8 +17,9 @@
 
 package shark.execution
 
-import java.io.{File, InputStream}
-import java.util.{Arrays, Properties}
+import java.io.{File, InputStream, IOException}
+import java.lang.Thread.UncaughtExceptionHandler
+import java.util.Properties
 
 import scala.collection.JavaConversions._
 import scala.io.Source
@@ -26,16 +27,19 @@ import scala.reflect.BeanProperty
 
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.hive.conf.HiveConf
+import org.apache.hadoop.hive.ql.exec.{RecordReader, RecordWriter}
 import org.apache.hadoop.hive.ql.exec.{ScriptOperator => HiveScriptOperator}
-import org.apache.hadoop.hive.ql.exec.{RecordReader, RecordWriter, ScriptOperatorHelper}
+import org.apache.hadoop.hive.ql.exec.{ScriptOperatorHelper => HiveScriptOperatorHelper}
 import org.apache.hadoop.hive.ql.plan.ScriptDesc
 import org.apache.hadoop.hive.serde2.{Serializer, Deserializer}
-import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspector
 import org.apache.hadoop.io.{BytesWritable, Writable}
 
-import shark.execution.serialization.OperatorSerializationWrapper
+import org.apache.spark.{SparkEnv, SparkFiles}
+import org.apache.spark.rdd.RDD
+import org.apache.spark.TaskContext
 
-import spark.{OneToOneDependency, RDD, SparkEnv, Split}
+import shark.execution.serialization.OperatorSerializationWrapper
+import shark.LogHelper
 
 
 /**
@@ -43,12 +47,13 @@ import spark.{OneToOneDependency, RDD, SparkEnv, Split}
  *
  * Example: select transform(key) using 'cat' as cola from src;
  */
-class ScriptOperator extends UnaryOperator[HiveScriptOperator] {
+class ScriptOperator extends UnaryOperator[ScriptDesc] {
 
-  @BeanProperty var localHiveOp: HiveScriptOperator = _
   @BeanProperty var localHconf: HiveConf = _
   @BeanProperty var alias: String = _
+  @BeanProperty var conf: ScriptDesc = _
 
+  @transient var operatorId: String = _
   @transient var scriptInputSerializer: Serializer = _
   @transient var scriptOutputDeserializer: Deserializer = _
 
@@ -61,20 +66,28 @@ class ScriptOperator extends UnaryOperator[HiveScriptOperator] {
 
     val op = OperatorSerializationWrapper(this)
     val (command, envs) = getCommandAndEnvs()
-    val outRecordReaderClass: Class[_ <: RecordReader] = hiveOp.getConf().getOutRecordReaderClass()
-    val inRecordWriterClass: Class[_ <: RecordWriter] = hiveOp.getConf().getInRecordWriterClass()
-    logInfo("Using %s and %s".format(outRecordReaderClass, inRecordWriterClass))
+    val outRecordReaderClass: Class[_ <: RecordReader] = conf.getOutRecordReaderClass()
+    val inRecordWriterClass: Class[_ <: RecordWriter] = conf.getInRecordWriterClass()
+    logDebug("Using %s and %s".format(outRecordReaderClass, inRecordWriterClass))
 
     // Deserialize the output from script back to what Hive understands.
-    inputRdd.mapPartitions { part =>
+    inputRdd.mapPartitionsWithContext { (context, part) =>
       op.initializeOnSlave()
 
       // Serialize the data so it is recognizable by the script.
       val iter = op.serializeForScript(part)
 
+      // Rebuild the command to specify paths on each node.
+      // For example, if the command is "python test.py data.dat", the following can turn
+      // it into "python /path/to/workdir/test.py /path/to/workdir/data.dat".
       val workingDir = System.getProperty("user.dir")
       val newCmd = command.map { arg =>
-        if (new File(workingDir + "/" + arg).exists()) "./" + arg else arg
+        val uploadedFile = SparkFiles.get(arg)
+        if (new File(uploadedFile).exists()) {
+          uploadedFile
+        } else {
+          arg
+        }
       }
       val pb = new ProcessBuilder(newCmd.toSeq)
       pb.directory(new File(workingDir))
@@ -88,28 +101,37 @@ class ScriptOperator extends UnaryOperator[HiveScriptOperator] {
       // Get the thread local SparkEnv so we can pass it into the new thread.
       val sparkEnv = SparkEnv.get
 
+      // If true, exceptions thrown by child threads will be ignored.
+      val allowPartialConsumption = op.allowPartialConsumption
+
       // Start a thread to print the process's stderr to ours
-      new Thread("stderr reader for " + command) {
+      val errorReaderThread = new Thread("stderr reader for " + command) {
         override def run() {
-          for(line <- Source.fromInputStream(proc.getErrorStream).getLines) {
+          for (line <- Source.fromInputStream(proc.getErrorStream).getLines) {
             System.err.println(line)
           }
         }
-      }.start()
+      }
+      errorReaderThread.setUncaughtExceptionHandler(
+        new ScriptOperator.ScriptExceptionHandler(allowPartialConsumption, context))
+      errorReaderThread.start()
 
       // Start a thread to feed the process input from our parent's iterator
-      new Thread("stdin writer for " + command) {
+      val inputWriterThread = new Thread("stdin writer for " + command) {
         override def run() {
           // Set the thread local SparkEnv.
           SparkEnv.set(sparkEnv)
           val recordWriter = inRecordWriterClass.newInstance
           recordWriter.initialize(proc.getOutputStream, op.localHconf)
-          for(elem <- iter) {
+          for (elem <- iter) {
             recordWriter.write(elem)
           }
           recordWriter.close()
         }
-      }.start()
+      }
+      inputWriterThread.setUncaughtExceptionHandler(
+        new ScriptOperator.ScriptExceptionHandler(allowPartialConsumption, context))
+      inputWriterThread.start()
 
       // Return an iterator that reads outputs from RecordReader. Use our own
       // BinaryRecordReader if necessary because Hive's has a bug (see below).
@@ -122,31 +144,29 @@ class ScriptOperator extends UnaryOperator[HiveScriptOperator] {
       recordReader.initialize(
         proc.getInputStream,
         op.localHconf,
-        op.localHiveOp.getConf().getScriptOutputInfo().getProperties())
+        op.conf.getScriptOutputInfo().getProperties())
 
       op.deserializeFromScript(new ScriptOperator.RecordReaderIterator(recordReader))
     }
   }
 
   override def initializeOnMaster() {
-    localHiveOp = hiveOp
+    super.initializeOnMaster()
     localHconf = super.hconf
-    // Set parent to null so we won't serialize the entire query plan.
-    hiveOp.setParentOperators(null)
-    hiveOp.setChildOperators(null)
-    hiveOp.setInputObjInspectors(null)
+    conf = desc
+    
+    initializeOnSlave()
   }
 
+  override def outputObjectInspector() = scriptOutputDeserializer.getObjectInspector()
+  
   override def initializeOnSlave() {
-    scriptOutputDeserializer = localHiveOp.getConf().getScriptOutputInfo()
-        .getDeserializerClass().newInstance()
-    scriptOutputDeserializer.initialize(localHconf, localHiveOp.getConf()
-        .getScriptOutputInfo().getProperties())
+    scriptOutputDeserializer = conf.getScriptOutputInfo().getDeserializerClass().newInstance()
+    scriptOutputDeserializer.initialize(localHconf, conf.getScriptOutputInfo().getProperties())
 
-    scriptInputSerializer = localHiveOp.getConf().getScriptInputInfo().getDeserializerClass()
-        .newInstance().asInstanceOf[Serializer]
-    scriptInputSerializer.initialize(
-        localHconf, localHiveOp.getConf().getScriptInputInfo().getProperties())
+    scriptInputSerializer = conf.getScriptInputInfo().getDeserializerClass()
+      .newInstance().asInstanceOf[Serializer]
+    scriptInputSerializer.initialize(localHconf, conf.getScriptInputInfo().getProperties())
   }
 
   /**
@@ -155,17 +175,17 @@ class ScriptOperator extends UnaryOperator[HiveScriptOperator] {
    */
   def getCommandAndEnvs(): (Seq[String], Map[String, String]) = {
 
-    val scriptOpHelper = new ScriptOperatorHelper(new HiveScriptOperator)
+    val scriptOpHelper = new HiveScriptOperatorHelper(new HiveScriptOperator)
     alias = scriptOpHelper.getAlias
 
-    val cmdArgs = HiveScriptOperator.splitArgs(hiveOp.getConf().getScriptCmd())
+    val cmdArgs = HiveScriptOperator.splitArgs(conf.getScriptCmd())
     val prog = cmdArgs(0)
     val currentDir = new File(".").getAbsoluteFile()
 
     if (!(new File(prog)).isAbsolute()) {
       val finder = scriptOpHelper.newPathFinderInstance("PATH")
       finder.prependPathComponent(currentDir.toString())
-      var f = finder.getAbsolutePath(prog)
+      val f = finder.getAbsolutePath(prog)
       if (f != null) {
         cmdArgs(0) = f.getAbsolutePath()
       }
@@ -182,12 +202,12 @@ class ScriptOperator extends UnaryOperator[HiveScriptOperator] {
     scriptOpHelper.addJobConfToEnvironment(hconf, envs)
 
     envs.put(scriptOpHelper.safeEnvVarName(HiveConf.ConfVars.HIVEALIAS.varname),
-        String.valueOf(alias))
+      String.valueOf(alias))
 
     // Create an environment variable that uniquely identifies this script
     // operator
     val idEnvVarName = HiveConf.getVar(hconf, HiveConf.ConfVars.HIVESCRIPTIDENVVAR)
-    val idEnvVarVal = hiveOp.getOperatorId()
+    val idEnvVarVal = operatorId
     envs.put(scriptOpHelper.safeEnvVarName(idEnvVarName), idEnvVarVal)
 
     (wrappedCmdArgs, Map.empty ++ envs)
@@ -209,6 +229,9 @@ class ScriptOperator extends UnaryOperator[HiveScriptOperator] {
     }
   }
 
+  def allowPartialConsumption: Boolean =
+    HiveConf.getBoolVar(localHconf, HiveConf.ConfVars.ALLOWPARTIALCONSUMP)
+
   def serializeForScript[T](iter: Iterator[T]): Iterator[Writable] =
     iter.map { row => scriptInputSerializer.serialize(row, objectInspector) }
 
@@ -217,6 +240,47 @@ class ScriptOperator extends UnaryOperator[HiveScriptOperator] {
 }
 
 object ScriptOperator {
+
+  /**
+   * A general exception handler to attach to child threads used to feed input rows and forward
+   * errors to the parent thread during ScriptOperator#execute().
+   * If partial query consumption is not allowed (see HiveConf.Confvars.ALLOWPARTIALCONSUMP), then
+   * exceptions from child threads are caught by the handler and re-thrown by the parent thread
+   * through an on-task-completion callback registered with the Spark TaskContext. The task will be
+   * marked "failed" and the exception will be propagated to the master/CLI.
+   */
+  class ScriptExceptionHandler(allowPartialConsumption: Boolean, context: TaskContext)
+    extends UncaughtExceptionHandler
+    with LogHelper {
+
+    override def uncaughtException(thread: Thread, throwable: Throwable) {
+      throwable match {
+        case ioe: IOException => {
+          // Check whether the IOException should be re-thrown by the parent thread.
+          if (allowPartialConsumption) {
+            logWarning("Error while executing script. Ignoring %s"
+              .format(ioe.getMessage))
+          } else {
+            val onCompleteCallback = () => {
+              logWarning("Error during script execution. Set %s=true to ignore thrown IOExceptions."
+                .format(HiveConf.ConfVars.ALLOWPARTIALCONSUMP.toString))
+              throw ioe
+            }
+            context.synchronized {
+              context.addOnCompleteCallback(onCompleteCallback)
+            }
+          }
+        }
+        case _ => {
+          // Throw any other Exceptions or Errors.
+          val onCompleteCallback = () => throw throwable
+          context.synchronized {
+            context.addOnCompleteCallback(onCompleteCallback)
+          }
+        }
+      }
+    }
+  }
 
   /**
    * An iterator that wraps around a Hive RecordReader.
@@ -276,7 +340,7 @@ object ScriptOperator {
       if (recordLength >= 0) {
         bytesWritable.setSize(recordLength)
       }
-      return recordLength;
+      return recordLength
     }
 
     override def close() { if (in != null) { in.close() } }
