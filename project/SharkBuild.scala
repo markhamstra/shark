@@ -26,11 +26,11 @@ import scala.util.Properties.{ envOrNone => env }
 object SharkBuild extends Build {
 
   // Shark version
-  val SHARK_VERSION = "0.8.1-SNAPSHOT"
+  val SHARK_VERSION = "0.9.0-SNAPSHOT"
 
-  val SPARK_VERSION = "0.8.1-incubating-SNAPSHOT"
+  val SPARK_VERSION = "0.9.0-incubating-SNAPSHOT"
 
-  val SCALA_VERSION = "2.9.3"
+  val SCALA_VERSION = "2.10.3"
 
   // Hadoop version to build against. For example, "0.20.2", "0.20.205.0", or
   // "1.0.1" for Apache releases, or "0.20.2-cdh3u3" for Cloudera Hadoop.
@@ -44,7 +44,7 @@ object SharkBuild extends Build {
   val YARN_ENABLED = env("SHARK_YARN").getOrElse("false").toBoolean
 
   // Whether to build Shark with Tachyon jar.
-  val TACHYON_ENABLED = false
+  val TACHYON_ENABLED = true
 
   lazy val root = Project(
     id = "root",
@@ -65,7 +65,7 @@ object SharkBuild extends Build {
     organization := "edu.berkeley.cs.amplab",
     version := SHARK_VERSION,
     scalaVersion := SCALA_VERSION,
-    scalacOptions := Seq("-deprecation", "-unchecked", "-optimize"),
+    scalacOptions := Seq("-deprecation", "-unchecked", "-optimize", "-feature", "-Yinline-warnings"),
     parallelExecution in Test := false,
 
     // Download managed jars into lib_managed.
@@ -79,6 +79,7 @@ object SharkBuild extends Build {
     fork := true,
     javaOptions += "-XX:MaxPermSize=512m",
     javaOptions += "-Xmx2g",
+    javaOptions += "-Dsun.io.serialization.extendedDebugInfo=true",
 
     testOptions in Test += Tests.Argument("-oF"), // Full stack trace on test failures
 
@@ -113,7 +114,7 @@ object SharkBuild extends Build {
       "org.apache.spark" %% "spark-core" % SPARK_VERSION,
       "org.apache.spark" %% "spark-repl" % SPARK_VERSION,
       "com.google.guava" % "guava" % "14.0.1",
-      "org.apache.hadoop" % "hadoop-client" % hadoopVersion excludeAll(excludeJackson, excludeNetty, excludeAsm),
+      "org.apache.hadoop" % "hadoop-client" % hadoopVersion excludeAll(excludeJackson, excludeNetty, excludeAsm) force(),
       // See https://code.google.com/p/guava-libraries/issues/detail?id=1095
       "com.google.code.findbugs" % "jsr305" % "1.3.+",
 
@@ -128,8 +129,8 @@ object SharkBuild extends Build {
       "net.java.dev.jets3t" % "jets3t" % "0.7.1",
       "com.novocode" % "junit-interface" % "0.8" % "test") ++
       (if (YARN_ENABLED) Some("org.apache.spark" %% "spark-yarn" % SPARK_VERSION) else None).toSeq ++
-      (if (TACHYON_ENABLED) Some("org.tachyonproject" % "tachyon" % "0.3.0-SNAPSHOT" excludeAll(excludeKyro, excludeHadoop, excludeCurator, excludeJackson, excludeNetty, excludeAsm) ) else None).toSeq
-  )
+      (if (TACHYON_ENABLED) Some("org.tachyonproject" % "tachyon" % "0.3.0" excludeAll(excludeKyro, excludeHadoop, excludeCurator, excludeJackson, excludeNetty, excludeAsm)) else None).toSeq
+  ) ++ org.scalastyle.sbt.ScalastylePlugin.Settings
 
   def assemblyProjSettings = Seq(
     jarName in assembly <<= version map { v => "shark-assembly-" + v + "-hadoop" + hadoopVersion + ".jar" }

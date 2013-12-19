@@ -17,6 +17,8 @@
 
 package org.apache.spark
 
+import scala.language.existentials
+
 import java.io.{ObjectOutputStream, IOException}
 import java.util.{HashMap => JHashMap}
 
@@ -49,12 +51,15 @@ case class NarrowCoGroupSplitDep(
 
 case class ShuffleCoGroupSplitDep(shuffleId: Int) extends CoGroupSplitDep
 
+// equals not implemented style error
+// scalastyle:off
 class CoGroupPartition(idx: Int, val deps: Seq[CoGroupSplitDep])
   extends Partition with Serializable {
 
   override val index: Int = idx
   override def hashCode(): Int = idx
 }
+// scalastyle:on
 
 class CoGroupAggregator
   extends Aggregator[Any, Any, ArrayBuffer[Any]](
@@ -126,7 +131,7 @@ class CoGroupedRDD[K](@transient var rdds: Seq[RDD[(_, _)]], part: Partitioner)
           .foreach(mergePair)
       }
     }
-    map.iterator
+    new InterruptibleIterator(context, map.iterator)
   }
 
   override def clearDependencies() {
