@@ -361,5 +361,3 @@ object SharkContext {
   // A dummy init to make sure the object is properly initialized.
   def init() {}
 }
-
-
