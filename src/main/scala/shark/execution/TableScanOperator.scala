@@ -37,7 +37,9 @@ import org.apache.spark.rdd.{PartitionPruningRDD, RDD}
 
 import shark.{LogHelper, SharkConfVars, SharkEnv}
 import shark.execution.optimization.ColumnPruner
-import shark.memstore2.{CacheType, ColumnarSerDe, MemoryMetadataManager}
+import shark.memstore2.CacheType
+import shark.memstore2.CacheType._
+import shark.memstore2.{ColumnarSerDe, MemoryMetadataManager}
 import shark.memstore2.{TablePartition, TablePartitionStats}
 import shark.util.HiveUtils
 
@@ -70,20 +72,25 @@ class TableScanOperator extends TopOperator[TableScanDesc] {
 
   @BeanProperty var tableDesc: TableDesc = _
 
+  // True if table data is stored the Spark heap.
   @BeanProperty var isInMemoryTableScan: Boolean = _
+
+  @BeanProperty var cacheMode: CacheType.CacheType = _
 
 
   override def initializeOnMaster() {
     // Create a local copy of the HiveConf that will be assigned job properties and, for disk reads,
     // broadcasted to slaves.
     localHConf = new HiveConf(super.hconf)
+    cacheMode = CacheType.fromString(
+      tableDesc.getProperties().get("shark.cache").asInstanceOf[String])
     isInMemoryTableScan = SharkEnv.memoryMetadataManager.containsTable(
       table.getDbName, table.getTableName)
   }
 
   override def outputObjectInspector() = {
     if (parts == null) {
-      val serializer = if (isInMemoryTableScan) {
+      val serializer = if (isInMemoryTableScan || cacheMode == CacheType.TACHYON) {
         new ColumnarSerDe
       } else {
         tableDesc.getDeserializerClass().newInstance()
@@ -92,7 +99,7 @@ class TableScanOperator extends TopOperator[TableScanDesc] {
       serializer.getObjectInspector()
     } else {
       val partProps = firstConfPartDesc.getProperties()
-      val partSerDe = if (isInMemoryTableScan) {
+      val partSerDe = if (isInMemoryTableScan || cacheMode == CacheType.TACHYON) {
         new ColumnarSerDe
       } else {
         firstConfPartDesc.getDeserializerClass().newInstance()
@@ -113,45 +120,39 @@ class TableScanOperator extends TopOperator[TableScanDesc] {
     // 1. Spark heap (block manager), accessed through the Shark MemoryMetadataManager
     // 2. Tachyon table
     // 3. Hive table on HDFS (or other Hadoop storage)
-    val cacheMode = CacheType.fromString(
-      tableDesc.getProperties().get("shark.cache").asInstanceOf[String])
     // TODO(harvey): Pruning Hive-partitioned, cached tables isn't supported yet.
-    if (isInMemoryTableScan) {
-      assert (cacheMode == CacheType.MEMORY || cacheMode == CacheType.MEMORY_ONLY,
-        "Table %s.%s is in Shark metastore, but its cacheMode (%s) indicates otherwise".
-          format(databaseName, tableName, cacheMode))
-      val tableReader = new HeapTableReader(tableDesc)
-      if (table.isPartitioned) {
-        return tableReader.makeRDDForPartitionedTable(parts)
-      } else {
-        val tableRdd = tableReader.makeRDDForTable(table)
-        return createPrunedRdd(databaseName, tableName, tableRdd)
+    if (isInMemoryTableScan || cacheMode == CacheType.TACHYON) {
+      if (isInMemoryTableScan) {
+        assert(cacheMode == CacheType.MEMORY || cacheMode == CacheType.MEMORY_ONLY,
+          "Table %s.%s is in Shark metastore, but its cacheMode (%s) indicates otherwise".
+            format(databaseName, tableName, cacheMode))
       }
-    } else if (cacheMode == CacheType.TACHYON) {
-      val tableReader = new TachyonTableReader(tableDesc)
-      if (table.isPartitioned) {
-        return tableReader.makeRDDForPartitionedTable(parts)
+      val tableReader = if (cacheMode == CacheType.TACHYON) {
+        new TachyonTableReader(tableDesc)
       } else {
-        val tableRdd = tableReader.makeRDDForTable(table)
-        return createPrunedRdd(databaseName, tableName, tableRdd)
+        new HeapTableReader(tableDesc)
+      }
+      if (table.isPartitioned) {
+        tableReader.makeRDDForPartitionedTable(parts, Some(createPrunedRdd _))
+      } else {
+        tableReader.makeRDDForTable(table, Some(createPrunedRdd _))
       }
     } else {
       // Table is a Hive table on HDFS (or other Hadoop storage).
-      return makeRDDFromHadoop()
+      makeRDDFromHadoop()
     }
   }
 
-  private def createPrunedRdd(databaseName: String, tableName: String, rdd: RDD[_]): RDD[_] = {
-    // Stats used for map pruning.
-    val indexToStatsOpt: Option[collection.Map[Int, TablePartitionStats]] =
-      SharkEnv.memoryMetadataManager.getStats(databaseName, tableName)
-    assert(indexToStatsOpt.isDefined, "Stats not found for table " + tableName)
-    val indexToStats = indexToStatsOpt.get
-
+  private def createPrunedRdd(
+      rdd: RDD[_],
+      indexToStats: collection.Map[Int, TablePartitionStats]): RDD[_] = {
     // Run map pruning if the flag is set, there exists a filter predicate on
     // the input table and we have statistics on the table.
     val columnsUsed = new ColumnPruner(this, table).columnsUsed
-    SharkEnv.tachyonUtil.pushDownColumnPruning(rdd, columnsUsed)
+
+    if (!table.isPartitioned && cacheMode == CacheType.TACHYON) {
+      SharkEnv.tachyonUtil.pushDownColumnPruning(rdd, columnsUsed)
+    }
 
     val shouldPrune = SharkConfVars.getBoolVar(localHConf, SharkConfVars.MAP_PRUNING) &&
       childOperators(0).isInstanceOf[FilterOperator] &&
@@ -184,15 +185,16 @@ class TableScanOperator extends TopOperator[TableScanDesc] {
       val prunedRdd = PartitionPruningRDD.create(rdd, prunePartitionFunc)
       val timeTaken = System.currentTimeMillis - startTime
       logInfo("Map pruning %d partitions into %s partitions took %d ms".format(
-          rdd.partitions.size, prunedRdd.partitions.size, timeTaken))
+        rdd.partitions.size, prunedRdd.partitions.size, timeTaken))
       prunedRdd
     } else {
       rdd
     }
 
-    return prunedRdd.mapPartitions { iter =>
+    prunedRdd.mapPartitions { iter =>
       if (iter.hasNext) {
-        val tablePartition = iter.next().asInstanceOf[TablePartition]
+        val tablePartition1 = iter.next()
+        val tablePartition = tablePartition1.asInstanceOf[TablePartition]
         tablePartition.prunedIterator(columnsUsed)
       } else {
         Iterator.empty

@@ -47,9 +47,9 @@ object OperatorFactory extends LogHelper {
       tableName: String,
       databaseName: String,
       numColumns: Int,
-      hivePartitionKey: String,
+      hivePartitionKeyOpt: Option[String],
       cacheMode: CacheType,
-      useUnionRDD: Boolean): TerminalOperator = {
+      isInsertInto: Boolean): TerminalOperator = {
     // TODO the terminal operator is the FileSinkOperator in Hive?
     val hiveOp = hiveTerminalOp.asInstanceOf[org.apache.hadoop.hive.ql.exec.FileSinkOperator]
     val sinkOp = _newOperatorInstance(
@@ -59,8 +59,8 @@ object OperatorFactory extends LogHelper {
     sinkOp.databaseName = databaseName
     sinkOp.numColumns = numColumns
     sinkOp.cacheMode = cacheMode
-    sinkOp.hivePartitionKey = hivePartitionKey
-    sinkOp.useUnionRDD = useUnionRDD
+    sinkOp.hivePartitionKeyOpt = hivePartitionKeyOpt
+    sinkOp.isInsertInto = isInsertInto
     _createAndSetParents(sinkOp, hiveTerminalOp.getParentOperators).asInstanceOf[TerminalOperator]
   }
 
