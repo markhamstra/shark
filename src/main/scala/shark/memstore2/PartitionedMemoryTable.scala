@@ -46,7 +46,7 @@ class PartitionedMemoryTable(
   // A map from the Hive-partition key to the RDD that contains contents of that partition.
   // The conventional string format for the partition key, 'col1=value1/col2=value2/...', can be
   // computed using MemoryMetadataManager#makeHivePartitionKeyStr().
-  private val _keyToPartitions: ConcurrentMap[String, RDDValue] =
+  private val _keyToPartitions: concurrent.Map[String, RDDValue] =
     new ConcurrentJavaHashMap[String, RDDValue]()
 
   // The eviction policy for this table's cached Hive-partitions. An example of how this

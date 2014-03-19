@@ -21,29 +21,31 @@ if [[ -n "${SCALA_HOME:-}" && ! -f "${SCALA_HOME:-}/lib/scala-library.jar" ]] ; 
   exit 1
 fi
 
-# Hive related section.
-if [ "x$HIVE_HOME" == "x" ] ; then
-  echo "No HIVE_HOME specified. Please set HIVE_HOME."
-  exit 1
-fi
-
-if [ -z "${HIVE_VERSION:-}" ]; then
-  HIVE_VERSION="0.9.0"
-fi
-
-if [ ! -f "$HIVE_HOME/lib/hive-exec-$HIVE_VERSION.jar" ] ; then
-  echo "Cannot find $HIVE_HOME/lib/hive-exec-$HIVE_VERSION.jar."
-  echo "Are you sure your HIVE_HOME is set correctly?"
-  echo "HIVE_HOME = $HIVE_HOME"
-  exit 1
-fi
-
-
 if [ -n "$MASTER" ] ; then
   if [ -z $SPARK_HOME ] ; then
     echo "No SPARK_HOME specified. Please set SPARK_HOME for cluster mode."
     exit 1
   fi
+fi
+
+# check for shark with spark on yarn params
+if [ "x$SHARK_EXEC_MODE" == "xyarn" ] ; then
+  if [ "x$SPARK_ASSEMBLY_JAR" == "x" ] ; then
+    echo "No SPARK_ASSEMBLY_JAR specified. Please set SPARK_ASSEMBLY_JAR for spark on yarn mode."
+    exit 1
+  else
+    export SPARK_JAR=$SPARK_ASSEMBLY_JAR
+  fi
+
+  if [ "x$SHARK_ASSEMBLY_JAR" == "x" ] ; then
+    echo "No SHARK_ASSEMBLY_JAR specified. please set SHARK_ASSEMBLY_JAR for spark on yarn mode."
+    exit 1
+  else
+    export SPARK_YARN_APP_JAR=$SHARK_ASSEMBLY_JAR
+  fi
+
+  # use yarn-client mode for interactive shell.
+  export MASTER=yarn-client
 fi
 
 # check for shark with spark on yarn params
@@ -68,7 +70,7 @@ fi
 
 # Check for optionally specified configuration file path
 if [ "x$HIVE_CONF_DIR" == "x" ] ; then
-    HIVE_CONF_DIR="$HIVE_HOME/conf"
+    HIVE_CONF_DIR="$SHARK_HOME/conf"
 fi
 
 if [ -f "${HIVE_CONF_DIR}/hive-env.sh" ]; then
@@ -92,11 +94,6 @@ if [ -d "$SHARK_HOME/lib_managed/bundles" ]; then
     SPARK_CLASSPATH+=:$jar
   done
 fi
-
-# Add Hive jars.
-for jar in `find $HIVE_HOME/lib -name '*jar'`; do
-  SPARK_CLASSPATH+=:$jar
-done
 
 SPARK_CLASSPATH+=:$HIVE_CONF_DIR
 

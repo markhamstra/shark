@@ -43,7 +43,10 @@ class RDDTableFunctions(self: RDD[Seq[_]], classTags: Seq[ClassTag[_]]) {
     // Create the RDD object.
     val rdd = self.mapPartitionsWithIndex { case(partitionIndex, iter) =>
       val ois = classTags.map(HiveUtils.getJavaPrimitiveObjectInspector)
-      val builder = new TablePartitionBuilder(ois, 1000000, shouldCompress = false)
+      val builder = new TablePartitionBuilder(
+        HiveUtils.makeStandardStructObjectInspector(fields, ois),
+        1000000,
+        shouldCompress = false)
 
       for (p <- iter) {
         builder.incrementRowCount()
@@ -57,7 +60,8 @@ class RDDTableFunctions(self: RDD[Seq[_]], classTags: Seq[ClassTag[_]]) {
       Iterator(builder.build())
     }.persist()
 
-    var isSucessfulCreateTable = HiveUtils.createTableInHive(tableName, fields, classTags, Hive.get().getConf())
+    var isSucessfulCreateTable = HiveUtils.createTableInHive(
+      tableName, fields, classTags, Hive.get().getConf())
 
     // Put the table in the metastore. Only proceed if the DDL statement is executed successfully.
     val databaseName = Hive.get(SharkContext.hiveconf).getCurrentDatabase()
