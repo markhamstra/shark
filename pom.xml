@@ -16,7 +16,7 @@
     <encoding>UTF-8</encoding>
     <scala.version>2.10.3</scala.version>
     <scala.binary.version>2.10</scala.binary.version>
-    <hive.version>0.9.0-csd-22</hive.version>
+    <hive.version>0.11.0-shark-0.9.1-candidate-csd-1-SNAPSHOT</hive.version>
     <spark.version>0.9.1-candidate-csd-1-SNAPSHOT</spark.version>
     <cdh.version>4.1.2</cdh.version>
     <java.version>1.5</java.version>
@@ -227,12 +227,6 @@
     <dependency>
       <groupId>edu.berkeley.cs.shark</groupId>
       <artifactId>hive-service</artifactId>
-      <version>${hive.version}</version>
-      <optional>true</optional>
-    </dependency>
-    <dependency>
-      <groupId>edu.berkeley.cs.shark</groupId>
-      <artifactId>hive-builtins</artifactId>
       <version>${hive.version}</version>
       <optional>true</optional>
     </dependency>
