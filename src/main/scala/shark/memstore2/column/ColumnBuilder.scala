@@ -23,6 +23,9 @@ import java.nio.ByteOrder
 import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspector
 import org.apache.hadoop.hive.serde2.objectinspector.PrimitiveObjectInspector
 import org.apache.hadoop.hive.serde2.objectinspector.PrimitiveObjectInspector.PrimitiveCategory
+import org.apache.hadoop.hive.serde2.objectinspector.StructField
+
+import shark.LogHelper
 
 
 trait ColumnBuilder[T] {
@@ -33,6 +36,9 @@ trait ColumnBuilder[T] {
 
   private var _buffer: ByteBuffer = _
   private var _initialSize: Int = _
+  private var _columnName: String = _
+
+  def columnName: String = _columnName
 
   def append(o: Object, oi: ObjectInspector) {
     val v = t.get(o, oi)
@@ -55,9 +61,11 @@ trait ColumnBuilder[T] {
    * Initialize with an approximate lower bound on the expected number
    * of elements in this column.
    */
-  def initialize(initialSize: Int): ByteBuffer = {
-    _initialSize = if(initialSize == 0) 1024*1024*10 else initialSize
-    _buffer = ByteBuffer.allocate(_initialSize*t.defaultSize + 4 + 4)
+  def initialize(initialSize: Int, colName: String = ""): ByteBuffer = {
+    _columnName = colName
+    // Use 10MB as the initial size for the column if it is not specified.
+    _initialSize = if (initialSize == 0) 1024 * 1024 * 10 else initialSize
+    _buffer = ByteBuffer.allocate(_initialSize * t.defaultSize + 4 + 4)
     _buffer.order(ByteOrder.nativeOrder())
     _buffer.putInt(t.typeID)
   }
@@ -83,22 +91,35 @@ trait ColumnBuilder[T] {
 }
 
 class DefaultColumnBuilder[T](val stats: ColumnStats[T], val t: ColumnType[T, _])
-  extends CompressedColumnBuilder[T] with NullableColumnBuilder[T]{}
+  extends CompressedColumnBuilder[T] with NullableColumnBuilder[T]
 
 
-trait CompressedColumnBuilder[T] extends ColumnBuilder[T] {
+trait CompressedColumnBuilder[T] extends ColumnBuilder[T] with LogHelper {
 
-  var compressionSchemes: Seq[CompressionAlgorithm] = Seq()
+  private var compressionSchemes = Array.empty[CompressionAlgorithm]
 
+  /**
+   * Set the compression schemes to be used for this column. Only schemes that support
+   * the column's data type will be kept in the list.
+   */
+  def setCompressionSchemes(schemes: CompressionAlgorithm*) {
+    compressionSchemes = schemes.filter(_.supportsType(t)).toArray
+  }
+
+  /**
+   * Determines whether a particular compression algorithm should apply given the compression
+   * ratio. Test code can override this to force specific compression even if the compression
+   * ratio is not ideal.
+   */
   def shouldApply(scheme: CompressionAlgorithm): Boolean = {
     scheme.compressionRatio < 0.8
   }
 
-  override protected def gatherStats(v: T) = {
-    compressionSchemes.foreach { scheme =>
-      if (scheme.supportsType(t)) {
-        scheme.gatherStatsForCompressibility(v, t)
-      }
+  override protected def gatherStats(v: T) {
+    var i = 0
+    while (i < compressionSchemes.length) {
+      compressionSchemes(i).gatherStatsForCompressibility(v, t)
+      i += 1
     }
     super.gatherStats(v)
   }
@@ -106,23 +127,27 @@ trait CompressedColumnBuilder[T] extends ColumnBuilder[T] {
   override def build() = {
     val b = super.build()
 
-    if (compressionSchemes.isEmpty) {
-      new NoCompression().compress(b, t)
-    } else {
-      val candidateScheme = compressionSchemes.minBy(_.compressionRatio)
-      if (shouldApply(candidateScheme)) {
-        candidateScheme.compress(b, t)
+    val scheme: CompressionAlgorithm =
+      if (compressionSchemes.length == 0) {
+        new NoCompression
       } else {
-        new NoCompression().compress(b, t)
+        val scheme = compressionSchemes.minBy(_.compressionRatio)
+        if (shouldApply(scheme)) scheme else new NoCompression
       }
-    }
+
+    logInfo("Compression scheme chosen for [%s] is %s with ratio %f".format(
+      columnName, scheme.compressionType.getClass.getSimpleName, scheme.compressionRatio))
+
+    scheme.compress(b, t)
   }
 }
 
 
 object ColumnBuilder {
 
-  def create(columnOi: ObjectInspector, shouldCompress: Boolean = true): ColumnBuilder[_] = {
+  def create(structField: StructField, shouldCompress: Boolean = true): ColumnBuilder[_] = {
+    val columnOi = structField.getFieldObjectInspector
+
     val v = columnOi.getCategory match {
       case ObjectInspector.Category.PRIMITIVE => {
         columnOi.asInstanceOf[PrimitiveObjectInspector].getPrimitiveCategory match {
@@ -145,7 +170,13 @@ object ColumnBuilder {
       case _ => new GenericColumnBuilder(columnOi)
     }
     if (shouldCompress) {
-      v.compressionSchemes = Seq(new RLE(), new BooleanBitSetCompression())
+      v.setCompressionSchemes(
+        new NoCompression,
+        new RLE,
+        new BooleanBitSetCompression,
+        new DictionaryEncoding,
+        new IntDeltaEncoding,
+        new LongDeltaEncoding)
     }
     v
   }

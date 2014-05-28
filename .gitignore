@@ -7,7 +7,7 @@ TempStatsStore
 work/
 dependency-reduced-pom.xml
 run-tests-from-scratch-workspace/
-
+sbt/*.jar
 conf/shark-env.sh
 
 # Compiled Source
@@ -55,3 +55,5 @@ test_warehouses
 
 # This is copied by Hive to the project directory (should be fixed)
 hive-builtins-*.jar
+/eclipse_bin
+/.scala_dependencies

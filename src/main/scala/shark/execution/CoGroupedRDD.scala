@@ -17,6 +17,8 @@
 
 package org.apache.spark
 
+import scala.language.existentials
+
 import java.io.{ObjectOutputStream, IOException}
 import java.util.{HashMap => JHashMap}
 
@@ -63,7 +65,7 @@ class CoGroupAggregator
   extends Aggregator[Any, Any, ArrayBuffer[Any]](
     { x => ArrayBuffer(x) },
     { (b, x) => b += x },
-    null)
+    {(c1, c2) => c1++c2 })
   with Serializable
 
 // Disable map-side combine during aggregation.
@@ -115,7 +117,7 @@ class CoGroupedRDD[K](@transient var rdds: Seq[RDD[(_, _)]], part: Partitioner)
       }
       values
     }
-    val serializer = SparkEnv.get.serializerManager.get(SharkEnv.shuffleSerializerName)
+    val serializer = SparkEnv.get.serializerManager.get(SharkEnv.shuffleSerializerName, SparkEnv.get.conf)
     for ((dep, depNum) <- split.deps.zipWithIndex) dep match {
       case NarrowCoGroupSplitDep(rdd, itsSplitIndex, itsSplit) => {
         // Read them from the parent

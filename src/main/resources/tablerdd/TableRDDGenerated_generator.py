@@ -31,9 +31,11 @@ p.write(
 package shark.api
 
 // *** This file is auto-generated from TableRDDGenerated_generator.py ***
-
+import scala.language.implicitConversions
 import org.apache.spark.rdd.RDD
 import org.apache.spark.{TaskContext, Partition}
+
+import scala.reflect.ClassTag
 
 class TableSeqRDD(prev: TableRDD)
   extends RDD[Seq[Any]](prev) {
@@ -63,20 +65,20 @@ for x in range(1,23):
     tableClass = Template(
 """
 class TableRDD$num[$list](prev: TableRDD,
-                       mans: Seq[ClassManifest[_]])
+                          tags: Seq[ClassTag[_]])
   extends RDD[Tuple$num[$list]](prev) {
   def schema = prev.schema
 
   private val tableCols = schema.size
   require(tableCols == $num, "Table only has " + tableCols + " columns, expecting $num")
 
-  mans.zipWithIndex.foreach{ case (m, i) => if (DataTypes.fromManifest(m) != schema(i).dataType)
+  tags.zipWithIndex.foreach{ case (m, i) => if (DataTypes.fromClassTag(m) != schema(i).dataType)
     throw new IllegalArgumentException(
-      "Type mismatch on column " + (i + 1) + ", expected " + DataTypes.fromManifest(m) + " got " + schema(i).dataType) }
+      "Type mismatch on column " + (i + 1) + ", expected " + DataTypes.fromClassTag(m) + " got " + schema(i).dataType) }
 
   override def getPartitions = prev.getPartitions
 
-  override def compute(split: Partition, context: TaskContext): 
+  override def compute(split: Partition, context: TaskContext):
   Iterator[Tuple$num[$list]] = {
     prev.compute(split, context).map( row =>
       new Tuple$num[$list](

@@ -17,32 +17,21 @@
 
 package shark.execution
 
-import java.util.{ArrayList, Arrays}
-
 import scala.collection.JavaConversions._
 import scala.reflect.BeanProperty
 
 import org.apache.hadoop.hive.conf.HiveConf
-import org.apache.hadoop.hive.metastore.api.Constants.META_TABLE_PARTITION_COLUMNS
-import org.apache.hadoop.hive.ql.exec.{TableScanOperator => HiveTableScanOperator}
-import org.apache.hadoop.hive.ql.exec.{MapSplitPruning, Utilities}
+import org.apache.hadoop.hive.ql.exec.{MapSplitPruning, TableScanOperator => HiveTableScanOperator, Utilities}
 import org.apache.hadoop.hive.ql.metadata.{Partition, Table}
 import org.apache.hadoop.hive.ql.plan.{PartitionDesc, TableDesc, TableScanDesc}
-import org.apache.hadoop.hive.serde.Constants
-import org.apache.hadoop.hive.serde2.objectinspector.{ObjectInspector, ObjectInspectorFactory,
-  StructObjectInspector}
-import org.apache.hadoop.hive.serde2.objectinspector.primitive.PrimitiveObjectInspectorFactory
-
+import org.apache.hadoop.hive.serde.serdeConstants
+import org.apache.hadoop.hive.serde2.ColumnProjectionUtils
 import org.apache.spark.rdd.{PartitionPruningRDD, RDD}
 
 import shark.{LogHelper, SharkConfVars, SharkEnv}
 import shark.execution.optimization.ColumnPruner
-import shark.memstore2.CacheType
-import shark.memstore2.CacheType._
-import shark.memstore2.{ColumnarSerDe, MemoryMetadataManager}
-import shark.memstore2.{TablePartition, TablePartitionStats}
+import shark.memstore2._
 import shark.util.HiveUtils
-
 
 /**
  * The TableScanOperator is used for scanning any type of Shark or Hive table.
@@ -77,7 +66,6 @@ class TableScanOperator extends TopOperator[TableScanDesc] {
 
   @BeanProperty var cacheMode: CacheType.CacheType = _
 
-
   override def initializeOnMaster() {
     // Create a local copy of the HiveConf that will be assigned job properties and, for disk reads,
     // broadcasted to slaves.
@@ -90,26 +78,39 @@ class TableScanOperator extends TopOperator[TableScanDesc] {
 
   override def outputObjectInspector() = {
     if (parts == null) {
-      val serializer = if (isInMemoryTableScan || cacheMode == CacheType.TACHYON) {
+      val tableSerDe = if (isInMemoryTableScan || cacheMode == CacheType.OFFHEAP) {
         new ColumnarSerDe
       } else {
         tableDesc.getDeserializerClass().newInstance()
       }
-      serializer.initialize(hconf, tableDesc.getProperties)
-      serializer.getObjectInspector()
+      tableSerDe.initialize(hconf, tableDesc.getProperties)
+      tableSerDe.getObjectInspector()
     } else {
       val partProps = firstConfPartDesc.getProperties()
-      val partSerDe = if (isInMemoryTableScan || cacheMode == CacheType.TACHYON) {
+      val tableSerDe = if (isInMemoryTableScan || cacheMode == CacheType.OFFHEAP) {
         new ColumnarSerDe
       } else {
-        firstConfPartDesc.getDeserializerClass().newInstance()
+        tableDesc.getDeserializerClass().newInstance()
       }
-      partSerDe.initialize(hconf, partProps)
-      HiveUtils.makeUnionOIForPartitionedTable(partProps, partSerDe)
+      tableSerDe.initialize(hconf, tableDesc.getProperties)
+      HiveUtils.makeUnionOIForPartitionedTable(partProps, tableSerDe)
     }
   }
 
   override def execute(): RDD[_] = {
+
+    val numMappers = SharkConfVars.getIntVar(localHConf, SharkConfVars.NUM_MAPPERS)
+
+    // Try the use of given number of mappers for a job
+    if (numMappers > 0) {
+      logInfo("Setting the number of mappers to " + numMappers)
+      getBaseRDD.coalesce(numMappers, false)
+    } else {
+      getBaseRDD
+    }
+  }
+  
+  def getBaseRDD(): RDD[_] = {
     assert(parentOperators.size == 0)
 
     val tableNameSplit = tableDesc.getTableName.split('.') // Split from 'databaseName.tableName'
@@ -118,24 +119,25 @@ class TableScanOperator extends TopOperator[TableScanDesc] {
 
     // There are three places we can load the table from.
     // 1. Spark heap (block manager), accessed through the Shark MemoryMetadataManager
-    // 2. Tachyon table
+    // 2. Off-heap table
     // 3. Hive table on HDFS (or other Hadoop storage)
     // TODO(harvey): Pruning Hive-partitioned, cached tables isn't supported yet.
-    if (isInMemoryTableScan || cacheMode == CacheType.TACHYON) {
+    if (isInMemoryTableScan || cacheMode == CacheType.OFFHEAP) {
       if (isInMemoryTableScan) {
         assert(cacheMode == CacheType.MEMORY || cacheMode == CacheType.MEMORY_ONLY,
           "Table %s.%s is in Shark metastore, but its cacheMode (%s) indicates otherwise".
             format(databaseName, tableName, cacheMode))
       }
-      val tableReader = if (cacheMode == CacheType.TACHYON) {
-        new TachyonTableReader(tableDesc)
+      val tableReader = if (cacheMode == CacheType.OFFHEAP) {
+        new OffHeapTableReader(tableDesc, OffHeapStorageClient.client)
       } else {
         new HeapTableReader(tableDesc)
       }
+      val columnsUsed = new ColumnPruner(this, table).columnsUsed
       if (table.isPartitioned) {
-        tableReader.makeRDDForPartitionedTable(parts, Some(createPrunedRdd _))
+        tableReader.makeRDDForPartitionedTable(parts, columnsUsed, createPrunedRdd)
       } else {
-        tableReader.makeRDDForTable(table, Some(createPrunedRdd _))
+        tableReader.makeRDDForTable(table, columnsUsed, createPrunedRdd)
       }
     } else {
       // Table is a Hive table on HDFS (or other Hadoop storage).
@@ -144,21 +146,17 @@ class TableScanOperator extends TopOperator[TableScanDesc] {
   }
 
   private def createPrunedRdd(
-      rdd: RDD[_],
+      rdd: RDD[TablePartition],
       indexToStats: collection.Map[Int, TablePartitionStats]): RDD[_] = {
     // Run map pruning if the flag is set, there exists a filter predicate on
     // the input table and we have statistics on the table.
     val columnsUsed = new ColumnPruner(this, table).columnsUsed
 
-    if (!table.isPartitioned && cacheMode == CacheType.TACHYON) {
-      SharkEnv.tachyonUtil.pushDownColumnPruning(rdd, columnsUsed)
-    }
-
     val shouldPrune = SharkConfVars.getBoolVar(localHConf, SharkConfVars.MAP_PRUNING) &&
       childOperators(0).isInstanceOf[FilterOperator] &&
       indexToStats.size == rdd.partitions.size
 
-    val prunedRdd: RDD[_] = if (shouldPrune) {
+    val prunedRdd = if (shouldPrune) {
       val startTime = System.currentTimeMillis
       val printPruneDebug = SharkConfVars.getBoolVar(
         localHConf, SharkConfVars.MAP_PRUNING_PRINT_DEBUG)
@@ -193,8 +191,7 @@ class TableScanOperator extends TopOperator[TableScanDesc] {
 
     prunedRdd.mapPartitions { iter =>
       if (iter.hasNext) {
-        val tablePartition1 = iter.next()
-        val tablePartition = tablePartition1.asInstanceOf[TablePartition]
+        val tablePartition = iter.next()
         tablePartition.prunedIterator(columnsUsed)
       } else {
         Iterator.empty
@@ -208,16 +205,17 @@ class TableScanOperator extends TopOperator[TableScanDesc] {
   def makeRDDFromHadoop(): RDD[_] = {
     // Try to have the InputFormats filter predicates.
     TableScanOperator.addFilterExprToConf(localHConf, hiveOp)
+    val columnsUsed = new ColumnPruner(this, table).columnsUsed
 
     val hadoopReader = new HadoopTableReader(tableDesc, localHConf)
     if (table.isPartitioned) {
       logDebug("Making %d Hive partitions".format(parts.size))
       // The returned RDD contains arrays of size two with the elements as
       // (deserialized row, column partition value).
-      return hadoopReader.makeRDDForPartitionedTable(parts)
+      return hadoopReader.makeRDDForPartitionedTable(parts, columnsUsed)
     } else {
       // The returned RDD contains deserialized row Objects.
-      return hadoopReader.makeRDDForTable(table)
+      return hadoopReader.makeRDDForTable(table, columnsUsed)
     }
   }
 
@@ -236,6 +234,14 @@ object TableScanOperator extends LogHelper {
    * since we would have to serialize the HiveTableScanOperator.
    */
   private def addFilterExprToConf(hiveConf: HiveConf, hiveTableScanOp: HiveTableScanOperator) {
+    // Push down projections for this TableScanOperator to Hadoop JobConf
+    if (hiveTableScanOp.getNeededColumnIDs() != null) {
+      ColumnProjectionUtils.appendReadColumnIDs(hiveConf, hiveTableScanOp.getNeededColumnIDs())
+    } else {
+      ColumnProjectionUtils.setFullyReadColumns(hiveConf)
+    }
+    ColumnProjectionUtils.appendReadColumnNames(hiveConf, hiveTableScanOp.getNeededColumns())
+
     val tableScanDesc = hiveTableScanOp.getConf()
     if (tableScanDesc == null) return
 
@@ -250,7 +256,7 @@ object TableScanOperator extends LogHelper {
         columnNames.append(columnInfo.getInternalName())
       }
       val columnNamesString = columnNames.toString()
-      hiveConf.set(Constants.LIST_COLUMNS, columnNamesString)
+      hiveConf.set(serdeConstants.LIST_COLUMNS, columnNamesString)
 
       // Add column types to the HiveConf.
       val columnTypes = new StringBuilder
@@ -261,7 +267,7 @@ object TableScanOperator extends LogHelper {
         columnTypes.append(columnInfo.getType().getTypeName())
       }
       val columnTypesString = columnTypes.toString()
-      hiveConf.set(Constants.LIST_COLUMN_TYPES, columnTypesString)
+      hiveConf.set(serdeConstants.LIST_COLUMN_TYPES, columnTypesString)
     }
 
     // Push down predicate filters.

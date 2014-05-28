@@ -17,8 +17,6 @@
 
 package shark
 
-import java.util.{HashMap => JavaHashMap}
-
 import scala.collection.JavaConversions._
 
 import org.scalatest.FunSuite
@@ -32,8 +30,6 @@ import org.apache.spark.storage.StorageLevel
 import shark.api.QueryExecutionException
 import shark.memstore2.{CacheType, MemoryMetadataManager, PartitionedMemoryTable}
 import shark.tgf.{RDDSchema, Schema}
-import scala.util.Try
-
 // import expectSql() shortcut methods
 import shark.SharkRunner._
 
@@ -342,6 +338,12 @@ class SQLSuite extends FunSuite {
     assert(!SharkEnv.memoryMetadataManager.containsTable(DEFAULT_DB_NAME, "sharkTest5Cached"))
   }
 
+  test("lateral view explode column pruning") {
+    // If column pruner doesn't take lateral view into account, the first result will be null.
+    assert(sc.runSql("""select * from test_cached
+      lateral view explode(array(1, 2, 3)) exploadedTbl as col1""").results.head.head != null)
+  }
+
   //////////////////////////////////////////////////////////////////////////////
   // Caching Hive-partititioned tables
   // Note: references to 'partition' for this section refer to a Hive-partition.
@@ -618,6 +620,27 @@ class SQLSuite extends FunSuite {
       "StorageLevel for partition(keypart=2) should be NONE, but got: " + keypart2StorageLevel)
   }
 
+  test("FIFO: get() does not reload an RDD previously unpersist()'d.") {
+    val tableName = "dont_reload_evicted_partition"
+    val partitionedTable = createCachedPartitionedTable(
+      tableName,
+      3 /* numPartitionsToCreate */,
+      3 /* maxCacheSize */,
+      "shark.memstore2.FIFOCachePolicy")
+    assert(SharkEnv.memoryMetadataManager.containsTable(DEFAULT_DB_NAME, tableName))
+    val keypart1RDD = partitionedTable.keyToPartitions.get("keypart=1")
+    val lvl = TestUtils.getStorageLevelOfRDD(keypart1RDD.get)
+    assert(lvl == StorageLevel.MEMORY_AND_DISK, "got: " + lvl)
+    sc.runSql("""insert into table dont_reload_evicted_partition partition(keypart = 4)
+      select * from test""")
+    assert(TestUtils.getStorageLevelOfRDD(keypart1RDD.get) == StorageLevel.NONE)
+
+    // Scanning partition (keypart = 1) should reload the corresponding RDD into the cache, and
+    // cause eviction of the RDD for partition (keypart = 2).
+    sc.runSql("select count(1) from dont_reload_evicted_partition where keypart = 1")
+    assert(keypart1RDD.get.getStorageLevel == StorageLevel.NONE, "got: " +  keypart1RDD.get.getStorageLevel)
+  }
+
   ///////////////////////////////////////////////////////////////////////////////////////
   // Prevent nested UnionRDDs - those should be "flattened" in MemoryStoreSinkOperator.
   ///////////////////////////////////////////////////////////////////////////////////////
@@ -646,7 +669,7 @@ class SQLSuite extends FunSuite {
     sc.sql("insert into table part_table_cached partition(keypart = 1) select * from flat_cached")
     val tableName = "part_table_cached"
     val partitionKey = "keypart=1"
-    var partitionedTable = SharkEnv.memoryMetadataManager.getPartitionedTable(
+    val partitionedTable = SharkEnv.memoryMetadataManager.getPartitionedTable(
       DEFAULT_DB_NAME, tableName).get
     var unionRDD = partitionedTable.keyToPartitions.get(partitionKey).get.asInstanceOf[UnionRDD[_]]
     val numParentRDDs = unionRDD.rdds.size
@@ -819,11 +842,11 @@ class SQLSuite extends FunSuite {
     sc.runSql("drop table if exists test_unify_creation")
   }
 
-  test ("Table created by CREATE TABLE, with '_cached', is CacheType.MEMORY by default") {
+  test ("Table created by CREATE TABLE, with '_cached', is CacheType.MEMORY_ONLY by default") {
     sc.runSql("drop table if exists test_unify_creation_cached")
     sc.runSql("create table test_unify_creation_cached(key int, val string)")
     val table = sharkMetastore.getTable(DEFAULT_DB_NAME, "test_unify_creation_cached").get
-    assert(table.cacheMode == CacheType.MEMORY)
+    assert(table.cacheMode == CacheType.MEMORY_ONLY)
     sc.runSql("drop table if exists test_unify_creation_cached")
   }
 
@@ -837,11 +860,11 @@ class SQLSuite extends FunSuite {
     sc.runSql("drop table if exists test_unify_ctas")
   }
 
-  test ("Table created by CTAS, with '_cached', is CacheType.MEMORY by default") {
+  test ("Table created by CTAS, with '_cached', is CacheType.MEMORY_ONLY by default") {
     sc.runSql("drop table if exists test_unify_ctas_cached")
     sc.runSql("create table test_unify_ctas_cached as select  * from test")
     val table = sharkMetastore.getTable(DEFAULT_DB_NAME, "test_unify_ctas_cached").get
-    assert(table.cacheMode == CacheType.MEMORY)
+    assert(table.cacheMode == CacheType.MEMORY_ONLY)
     expectSql("select count(*) from test_unify_ctas_cached", "500")
     sc.runSql("drop table if exists test_unify_ctas_cached")
   }
@@ -869,7 +892,10 @@ class SQLSuite extends FunSuite {
   //////////////////////////////////////////////////////////////////////////////
   test ("LOAD INTO unified view") {
     sc.runSql("drop table if exists unified_view_cached")
-    sc.runSql("create table unified_view_cached (key int, value string)")
+    sc.runSql(
+      """create table unified_view_cached (key int, value string)
+        |tblproperties("shark.cache" = "memory")
+      """.stripMargin)
     sc.runSql("load data local inpath '%s' into table unified_view_cached".format(KV1_TXT_PATH))
     expectUnifiedKVTable("unified_view_cached")
     expectSql("select count(*) from unified_view_cached", "500")
@@ -878,7 +904,8 @@ class SQLSuite extends FunSuite {
 
   test ("LOAD OVERWRITE unified view") {
     sc.runSql("drop table if exists unified_overwrite_cached")
-    sc.runSql("create table unified_overwrite_cached (key int, value string)")
+    sc.runSql("create table unified_overwrite_cached (key int, value string)" +
+      "tblproperties(\"shark.cache\" = \"memory\")")
     sc.runSql("load data local inpath '%s' into table unified_overwrite_cached".
       format("${hiveconf:shark.test.data.path}/kv3.txt"))
     expectSql("select count(*) from unified_overwrite_cached", "25")
@@ -893,7 +920,7 @@ class SQLSuite extends FunSuite {
   test ("LOAD INTO partitioned unified view") {
     sc.runSql("drop table if exists unified_view_part_cached")
     sc.runSql("""create table unified_view_part_cached (key int, value string)
-      partitioned by (keypart int)""")
+      partitioned by (keypart int) tblproperties("shark.cache" = "memory")""")
     sc.runSql("""load data local inpath '%s' into table unified_view_part_cached
       partition(keypart = 1)""".format(KV1_TXT_PATH))
     expectUnifiedKVTable("unified_view_part_cached", Some(Map("keypart" -> "1")))
@@ -904,7 +931,7 @@ class SQLSuite extends FunSuite {
   test ("LOAD OVERWRITE partitioned unified view") {
     sc.runSql("drop table if exists unified_overwrite_part_cached")
     sc.runSql("""create table unified_overwrite_part_cached (key int, value string)
-      partitioned by (keypart int)""")
+      partitioned by (keypart int) tblproperties("shark.cache" = "memory")""")
     sc.runSql("""load data local inpath '%s' overwrite into table unified_overwrite_part_cached
       partition(keypart = 1)""".format(KV1_TXT_PATH))
     expectUnifiedKVTable("unified_overwrite_part_cached", Some(Map("keypart" -> "1")))
@@ -917,7 +944,8 @@ class SQLSuite extends FunSuite {
   //////////////////////////////////////////////////////////////////////////////
   test ("INSERT INTO unified view") {
     sc.runSql("drop table if exists unified_view_cached")
-    sc.runSql("create table unified_view_cached as select * from test_cached")
+    sc.runSql("create table unified_view_cached tblproperties('shark.cache'='memory') " +
+      "as select * from test_cached")
     sc.runSql("insert into table unified_view_cached select * from test_cached")
     expectUnifiedKVTable("unified_view_cached")
     expectSql("select count(*) from unified_view_cached", "1000")
@@ -926,7 +954,8 @@ class SQLSuite extends FunSuite {
 
   test ("INSERT OVERWRITE unified view") {
     sc.runSql("drop table if exists unified_overwrite_cached")
-    sc.runSql("create table unified_overwrite_cached as select * from test")
+    sc.runSql("create table unified_overwrite_cached tblproperties('shark.cache'='memory')" +
+      "as select * from test")
     sc.runSql("insert overwrite table unified_overwrite_cached select * from test_cached")
     expectUnifiedKVTable("unified_overwrite_cached")
     expectSql("select count(*) from unified_overwrite_cached", "500")
@@ -935,8 +964,9 @@ class SQLSuite extends FunSuite {
 
   test ("INSERT INTO partitioned unified view") {
     sc.runSql("drop table if exists unified_view_part_cached")
-    sc.runSql("""create table unified_view_part_cached (key int, value string) 
-      partitioned by (keypart int)""")
+    sc.runSql("""create table unified_view_part_cached (key int, value string)
+                 partitioned by (keypart int)
+                 tblproperties('shark.cache'='memory')""")
     sc.runSql("""insert into table unified_view_part_cached partition (keypart = 1) 
       select * from test_cached""")
     expectUnifiedKVTable("unified_view_part_cached", Some(Map("keypart" -> "1")))
@@ -946,8 +976,8 @@ class SQLSuite extends FunSuite {
 
   test ("INSERT OVERWRITE partitioned unified view") {
     sc.runSql("drop table if exists unified_overwrite_part_cached")
-    sc.runSql("""create table unified_overwrite_part_cached (key int, value string) 
-      partitioned by (keypart int)""")
+    sc.runSql("""create table unified_overwrite_part_cached (key int, value string)
+                 partitioned by (keypart int) tblproperties('shark.cache'='memory')""")
     sc.runSql("""insert overwrite table unified_overwrite_part_cached partition (keypart = 1) 
       select * from test_cached""")
     expectUnifiedKVTable("unified_overwrite_part_cached", Some(Map("keypart" -> "1")))
@@ -1023,9 +1053,9 @@ class SQLSuite extends FunSuite {
   //////////////////////////////////////////////////////////////////////////////
   // Cached table persistence
   //////////////////////////////////////////////////////////////////////////////
-  test ("Cached tables persist across Shark metastore shutdowns.") {
+  ignore ("Cached tables persist across Shark metastore shutdowns.") {
     val globalCachedTableNames = Seq("test_cached", "test_null_cached", "clicks_cached",
-      "users_cached", "test1_cached")
+      "users_cached")
 
     // Number of rows for each cached table.
     val cachedTableCounts = new Array[String](globalCachedTableNames.size)
@@ -1049,6 +1079,32 @@ class SQLSuite extends FunSuite {
     }
     // Finally, reload all tables.
     SharkRunner.loadTables()
+  }
+
+  //////////////////////////////////////////////////////////////////////////////
+  // Window Function Support
+  //////////////////////////////////////////////////////////////////////////////
+  test("window function support") {
+    expectSql("select id,name,count(id) over (partition by name) from users",
+      Array[String]("1\tA\t2", "3\tA\t2", "2\tB\t1"))
+    expectSql("select id,name,sum(id) over(partition by name order by id) from users",
+      Array[String]("1\tA\t1", "3\tA\t4", "2\tB\t2"))
+    expectSql("select id,name,sum(id) over(partition by name order by id rows between " +
+      "unbounded preceding and current row) from users",
+      Array[String]("1\tA\t1", "3\tA\t4", "2\tB\t2"))
+    expectSql("select id,name,sum(id) over(partition by name order by id rows between " +
+      "current row and unbounded following) from users",
+      Array[String]("1\tA\t4", "3\tA\t3", "2\tB\t2"))
+    expectSql("select id,name,sum(id) over(partition by name order by id rows between " +
+      "unbounded preceding and unbounded following) from users",
+      Array[String]("1\tA\t4", "3\tA\t4", "2\tB\t2"))
+    expectSql("select id,name,lead(id) over(partition by name order by id) from users",
+      Array[String]("1\tA\t3", "3\tA\tnull", "2\tB\tnull"))
+    expectSql("select id,name,lag(id) over(partition by name order by id) from users",
+      Array[String]("1\tA\tnull", "3\tA\t1", "2\tB\tnull"))
+    expectSql("select id, name, sum(id) over w1 as sum_id, max(id) over w1 as max_id from users" +
+      " window w1 as (partition by name)",
+      Array[String]("2\tB\t2\t2","1\tA\t4\t3","3\tA\t4\t3"))
   }
 
   //////////////////////////////////////////////////////////////////////////////

@@ -12,11 +12,12 @@
 # Set up config vars using env vars or defaults; parse cmd line flags.
 #####################################################################
 SHARK_PROJ_DIR_DEFAULT="$(cd `dirname $0`/../../; pwd)"
+SBT_OPTS_DEFAULT="-Xms512M -Xmx2048M -Xss1M -XX:+CMSClassUnloadingEnabled -XX:MaxPermSize=512m -XX:ReservedCodeCacheSize=256m -XX:+UseCodeCacheFlushing"
 SPARK_MEM_DEFAULT=4g
 SHARK_MASTER_MEM_DEFAULT=4g
-SPARK_KV_JAVA_OPTS_DEFAULT=("-Dspark.local.dir=/tmp " "-Dspark.kryoserializer.buffer.mb=10 ")
-SPARK_GIT_URL_DEFAULT="https://github.com/apache/incubator-spark.git -b branch-0.8 spark"
-HIVE_GIT_URL_DEFAULT="https://github.com/amplab/hive.git -b shark-0.9"
+SPARK_KV_JAVA_OPTS_DEFAULT=("-Dspark.local.dir=/tmp " "-Dspark.kryoserializer.buffer.mb=10 -XX:MaxPermSize=1g ")
+SPARK_GIT_URL_DEFAULT="https://github.com/apache/incubator-spark.git -b branch-0.9 spark"
+HIVE_GIT_URL_DEFAULT="https://github.com/amplab/hive.git -b shark-0.11"
 SPARK_HADOOP_VERSION_DEFAULT="1.0.4"
 SPARK_WITH_YARN_DEFAULT=false
 
@@ -47,6 +48,10 @@ else
     echo "ERROR: your current value of JAVA_HOME (${JAVA_HOME}) is not valid."
     exit -1
   fi
+fi
+
+if [ "x$SBT_OPTS" == "x" ] ; then
+  SBT_OPTS=$SBT_OPTS_DEFAULT
 fi
 
 if [ "x$SPARK_MEM" == "x" ] ; then
@@ -116,7 +121,7 @@ Required Options:
 
 Optional configuration environment variables:
   SHARK_PROJ_DIR (default: "$SHARK_PROJ_DIR_DEFAULT")
-  SCALA_HOME (default: Scala version ${SCALA_VERSION} will be downloaded and used)
+  SBT_OPTS (default: "$SBT_OPTS_DEFAULT")
   SPARK_MEM (default: $SPARK_MEM_DEFAULT)
   SHARK_MASTER_MEM (default: $SHARK_MASTER_MEM_DEFAULT)
   SPARK_JAVA_OPTS (default: "${SPARK_KV_JAVA_OPTS_DEFAULT[@]}")
@@ -129,7 +134,6 @@ exit
 }
 
 # Initialize control flow vars.
-SKIP_SPARK=false
 SKIP_HIVE=false
 SKIP_HADOOP=false
 SKIP_TESTS=false
@@ -138,10 +142,6 @@ while getopts "hsedt" opt; do
   case $opt in
     h)
       usage
-      ;;
-    s)
-      echo SKIP SPARK
-      SKIP_SPARK=true
       ;;
     e)
       echo SKIP HIVE
@@ -195,15 +195,6 @@ export HIVE_HOME="$HIVE_DEV_HOME/build/dist"
 #   exit -1
 # fi
 
-if [ "x$SCALA_HOME" != "x" ] ; then
-  # User already specified SCALA_HOME. Make sure the correct version of Scala installed.
-  SCALA_HOME_VERSION=`${SCALA_HOME}/bin/scala -version|awk '{print $5}'`
-  if [ "$SCALA_HOME_VERSION" != "$SCALA_VERSION" ] ; then
-    echo "Your SCALA_HOME is version ${SCALA_HOME_VERSION}, but ${SCALA_VERSION} is required."
-    exit -1
-  fi
-fi
-
 # Kill this whole process group when Control-C is pressed. This ensures any child processes
 # aren't left running (this was happening before with Ant/Java processes).
 this_pgid=`ps -o pid -o pgid | grep $$ | awk '{print $2}'`
@@ -223,40 +214,8 @@ if [ -e "${SHARK_PROJ_DIR}/conf/shark-env.sh" ] ; then
 fi
 
 ####################################################################
-# Download Scala if SCALA_HOME is not specified.
+# Download Hadoop if necessary.
 ####################################################################
-if [ "x$SCALA_HOME" == "x" ] ; then
-  rm -rf ./scala*tgz
-  wget $SCALA_DOWNLOAD_PATH
-  tar xvfz scala*tgz
-  export SCALA_HOME="$WORKSPACE/scala-$SCALA_VERSION"
-fi
-echo "SCALA_HOME is $SCALA_HOME"
-
-####################################################################
-# Download and build Spark.
-####################################################################
-if $SKIP_SPARK ; then
-  if [ ! -e "spark" ] ; then
-    echo "spark dir must exist when skipping Spark download and build stage."
-    exit -1
-  fi
-else
-  # Clean up past Spark artifacts published locally.
-  rm -rf ./spark
-  rm -rf ~/.ivy2/local/org.apache.spark*
-  rm -rf ~/.ivy2/cache/org.apache.spark*
-  # Download and build Spark.
-  git clone $SPARK_GIT_URL
-  pushd spark
-  export SPARK_HADOOP_VERSION=$SPARK_HADOOP_VERSION
-  export SPARK_WITH_YARN=$SPARK_WITH_YARN
-  # Build spark and push the jars to local Ivy/Maven caches.
-  sbt/sbt clean publish-local
-  popd
-fi
-export SPARK_HOME="$WORKSPACE/spark"
-
 if $SKIP_HADOOP ; then
   if [ ! -e "hadoop-${SPARK_HADOOP_VERSION}" ] ; then
     echo "hadoop-${SPARK_HADOOP_VERSION} must exist when skipping Hadoop download and build stage."

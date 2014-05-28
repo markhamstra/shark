@@ -20,6 +20,8 @@ package shark.memstore2.column
 import java.nio.ByteBuffer
 import java.sql.Timestamp
 
+import scala.reflect.ClassTag
+
 import org.apache.hadoop.hive.serde2.ByteStream
 import org.apache.hadoop.hive.serde2.`lazy`.{ByteArrayRef, LazyBinary}
 import org.apache.hadoop.hive.serde2.io.ByteWritable
@@ -37,19 +39,18 @@ import org.apache.hadoop.io._
  * @tparam T Scala data type for the column.
  * @tparam V Writable data type for the column.
  */
-sealed abstract class ColumnType[T : ClassManifest, V : ClassManifest](
+sealed abstract class ColumnType[T : ClassTag, V : ClassTag](
     val typeID: Int, val defaultSize: Int) {
 
   /**
-   * Scala class manifest. Can be used to create primitive arrays and hash tables.
+   * Scala ClassTag. Can be used to create primitive arrays and hash tables.
    */
-  def scalaManifest: ClassManifest[T] = classManifest[T]
+  def scalaTag = implicitly[ClassTag[T]]
 
   /**
-   * Scala class manifest for the writable type. Can be used to create primitive arrays and
-   * hash tables.
+   * Scala ClassTag. Can be used to create primitive arrays and hash tables.
    */
-  def writableManifest: ClassManifest[V] = classManifest[V]
+  def writableScalaTag = implicitly[ClassTag[V]]
 
   /**
    * Extract a value out of the buffer at the buffer's current position.
@@ -105,6 +106,9 @@ object INT extends ColumnType[Int, IntWritable](0, 4) {
     oi.asInstanceOf[IntObjectInspector].get(o)
   }
 
+  // Primitive version
+  def getInt(o: Object, oi: ObjectInspector): Int = oi.asInstanceOf[IntObjectInspector].get(o)
+
   override def extractInto(buffer: ByteBuffer, writable: IntWritable) {
     writable.set(extract(buffer))
   }
@@ -126,6 +130,9 @@ object LONG extends ColumnType[Long, LongWritable](1, 8) {
   override def get(o: Object, oi: ObjectInspector): Long = {
     oi.asInstanceOf[LongObjectInspector].get(o)
   }
+
+  // Primitive version
+  def getLong(o: Object, oi: ObjectInspector): Long = oi.asInstanceOf[LongObjectInspector].get(o)
 
   override def extractInto(buffer: ByteBuffer, writable: LongWritable) {
     writable.set(extract(buffer))
@@ -210,6 +217,7 @@ object BYTE extends ColumnType[Byte, ByteWritable](5, 1) {
   override def extract(buffer: ByteBuffer) = {
     buffer.get()
   }
+
   override def get(o: Object, oi: ObjectInspector): Byte = {
     oi.asInstanceOf[ByteObjectInspector].get(o)
   }
@@ -235,6 +243,9 @@ object SHORT extends ColumnType[Short, ShortWritable](6, 2) {
   override def get(o: Object, oi: ObjectInspector): Short = {
     oi.asInstanceOf[ShortObjectInspector].get(o)
   }
+
+  // Primitive version
+  def getShort(o: Object, oi: ObjectInspector): Short = oi.asInstanceOf[ShortObjectInspector].get(o)
 
   def extractInto(buffer: ByteBuffer, writable: ShortWritable) {
     writable.set(extract(buffer))

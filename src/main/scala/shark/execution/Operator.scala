@@ -17,6 +17,8 @@
 
 package shark.execution
 
+import scala.language.existentials
+
 import java.util.{List => JavaList}
 import scala.collection.mutable.ArrayBuffer
 import scala.collection.JavaConversions._
@@ -168,7 +170,6 @@ abstract class Operator[+T <: HiveDesc] extends LogHelper with Serializable {
       length: Int, rowInspector: ObjectInspector): StructObjectInspector = {
 
     val inspectorLen = if (evals.length > length) length + 1 else evals.length
-    
     val sois = new ArrayBuffer[ObjectInspector](inspectorLen)
 
     // keys

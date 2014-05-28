@@ -17,14 +17,20 @@
 
 package shark.execution
 
+import java.util.{BitSet => JBitSet}
+
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{Path, PathFilter}
 import org.apache.hadoop.hive.conf.HiveConf
-import org.apache.hadoop.hive.metastore.api.Constants.META_TABLE_PARTITION_COLUMNS
+import org.apache.hadoop.hive.metastore.api.hive_metastoreConstants.META_TABLE_PARTITION_COLUMNS
 import org.apache.hadoop.hive.ql.exec.Utilities
+import org.apache.hadoop.hive.ql.io.orc.OrcSerde
 import org.apache.hadoop.hive.ql.metadata.{Partition => HivePartition, Table => HiveTable}
 import org.apache.hadoop.hive.ql.plan.TableDesc
-import org.apache.hadoop.hive.serde2.Deserializer
+import org.apache.hadoop.hive.serde2.{Deserializer, Serializer}
+import org.apache.hadoop.hive.serde2.columnar.{ColumnarStruct => HiveColumnarStruct}
+import org.apache.hadoop.hive.serde2.`lazy`.LazyStruct
+import org.apache.hadoop.hive.serde2.objectinspector.{StructObjectInspector, ObjectInspectorConverters}
 import org.apache.hadoop.io.Writable
 import org.apache.hadoop.mapred.{FileInputFormat, InputFormat, JobConf}
 
@@ -33,7 +39,7 @@ import org.apache.spark.rdd.{EmptyRDD, HadoopRDD, RDD, UnionRDD}
 import org.apache.spark.SerializableWritable
 
 import shark.{SharkEnv, Utils}
-
+import shark.execution.TableReader.PruningFunctionType
 
 /**
  * Helper class for scanning tables stored in Hadoop - e.g., to read Hive tables that reside in the
@@ -58,7 +64,8 @@ class HadoopTableReader(@transient _tableDesc: TableDesc, @transient _localHConf
 
   override def makeRDDForTable(
       hiveTable: HiveTable,
-      pruningFnOpt: Option[PruningFunctionType] = None
+      columnsUsed: JBitSet,
+      pruningFn: PruningFunctionType = NonPruningFunction
     ): RDD[_] =
     makeRDDForTable(
       hiveTable,
@@ -80,6 +87,10 @@ class HadoopTableReader(@transient _tableDesc: TableDesc, @transient _localHConf
       filterOpt: Option[PathFilter]): RDD[_] = {
     assert(!hiveTable.isPartitioned, """makeRDDForTable() cannot be called on a partitioned table,
       since input formats may differ across partitions. Use makeRDDForTablePartitions() instead.""")
+
+    val fs = hiveTable.getPath().getFileSystem(hiveConf)
+    if (!fs.exists(hiveTable.getPath()))
+      return new EmptyRDD(SharkEnv.sc)
 
     // Create local references to member variables, so that the entire `this` object won't be
     // serialized in the closure below.
@@ -112,7 +123,8 @@ class HadoopTableReader(@transient _tableDesc: TableDesc, @transient _localHConf
 
   override def makeRDDForPartitionedTable(
       partitions: Seq[HivePartition],
-      pruningFnOpt: Option[PruningFunctionType] = None
+      columnsUsed: JBitSet,
+      pruningFn: PruningFunctionType = NonPruningFunction
     ): RDD[_] = {
     val partitionToDeserializer = partitions.map(part =>
       (part, part.getDeserializer.getClass.asInstanceOf[Class[Deserializer]])).toMap
@@ -132,9 +144,14 @@ class HadoopTableReader(@transient _tableDesc: TableDesc, @transient _localHConf
   def makeRDDForPartitionedTable(
       partitionToDeserializer: Map[HivePartition, Class[_ <: Deserializer]],
       filterOpt: Option[PathFilter]): RDD[_] = {
-    val hivePartitionRDDs = partitionToDeserializer.map { case (partition, partDeserializer) =>
+    val hivePartitionRDDs = partitionToDeserializer.map { case (partition, _partSerDeClass) =>
       val partDesc = Utilities.getPartitionDesc(partition)
       val partPath = partition.getPartitionPath
+
+      val fs = partPath.getFileSystem(hiveConf)
+      if (!fs.exists(partPath))
+        return new EmptyRDD(SharkEnv.sc)
+
       val inputPathStr = applyFilterIfNeeded(partPath, filterOpt)
       val ifc = partDesc.getInputFileFormatClass
         .asInstanceOf[java.lang.Class[InputFormat[Writable, Writable]]]
@@ -153,18 +170,51 @@ class HadoopTableReader(@transient _tableDesc: TableDesc, @transient _localHConf
       }
 
       // Create local references so that the outer object isn't serialized.
-      val tableDesc = _tableDesc
+      val tableDesc = partDesc.getTableDesc
+      val tableSerDeClass = tableDesc.getDeserializerClass()
+      // Note that _partSerDeClass is an alias for Tuple2._2, the Tuple2 being a pair from `partitionToDeserializer`.
+      // Create another reference to just the SerDe class. Otherwise, the scheduler will try to serialize the Tuple2,
+      // which throws an exception due to the non-serializable Partition.
+      val partSerDeClass = _partSerDeClass
+      val tableProps = tableDesc.getProperties()
       val broadcastedHiveConf = _broadcastedHiveConf
 
       val hivePartitionRDD = createHadoopRdd(tableDesc, inputPathStr, ifc)
       hivePartitionRDD.mapPartitions { iter =>
+        val partSerDe = partSerDeClass.newInstance()
+        val tableSerDe = tableSerDeClass.newInstance()
         val hconf = broadcastedHiveConf.value.value
+        partSerDe.initialize(hconf, partProps)
+        tableSerDe.initialize(hconf, tableProps)
+
+        val tblConvertedOI = ObjectInspectorConverters.getConvertedOI(
+          partSerDe.getObjectInspector(), tableSerDe.getObjectInspector())
+          .asInstanceOf[StructObjectInspector]
+        val partTblObjectInspectorConverter = ObjectInspectorConverters.getConverter(
+          partSerDe.getObjectInspector(), tblConvertedOI)
         val rowWithPartArr = new Array[Object](2)
         // Map each tuple to a row object
         iter.map { value =>
-          val deserializer = partDeserializer.newInstance()
-          deserializer.initialize(hconf, partProps)
-          val deserializedRow = deserializer.deserialize(value) // LazyStruct
+          val deserializedRow = {
+
+            // If partition schema does not match table schema, update the row to match
+            val convertedRow = partTblObjectInspectorConverter.convert(partSerDe.deserialize(value))
+
+            // If conversion was performed, convertedRow will be a standard Object, but if
+            // conversion wasn't necessary, it will still be lazy. We can't have both across
+            // partitions, so we serialize and deserialize again to make it lazy.
+            if (tableSerDe.isInstanceOf[OrcSerde]) {
+              convertedRow
+            } else {
+              convertedRow match {
+                case _: LazyStruct => convertedRow
+                case _: HiveColumnarStruct => convertedRow
+                case _ => tableSerDe.deserialize(
+                  tableSerDe.asInstanceOf[Serializer].serialize(
+                    convertedRow, tblConvertedOI))
+              }
+            }
+          }
           rowWithPartArr.update(0, deserializedRow)
           rowWithPartArr.update(1, partValues)
           rowWithPartArr.asInstanceOf[Object]

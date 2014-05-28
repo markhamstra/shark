@@ -28,7 +28,8 @@ import java.util.Properties
 import java.util.concurrent.CountDownLatch
 
 import scala.annotation.tailrec
-import scala.concurrent.ops.spawn
+import scala.concurrent._
+import scala.concurrent.ExecutionContext.Implicits.global
 
 import org.apache.commons.logging.LogFactory
 import org.apache.commons.cli.OptionBuilder
@@ -81,6 +82,8 @@ object SharkServer extends LogHelper {
     // any log specific settings via hiveconf will be ignored.
     val hiveconf: Properties = cliOptions.addHiveconfToSystemProperties()
 
+    SharkEnv.fixUncompatibleConf(new HiveConf())
+
     // From Hive: It is critical to do this here so that log4j is reinitialized
     // before any of the other core hive classes are loaded
     LogUtils.initHiveLog4j()
@@ -93,7 +96,7 @@ object SharkServer extends LogHelper {
         var remoteClient = "Unknown"
 
         // Seed session ID by a random number
-        var sessionID = scala.Math.round(scala.Math.random * 10000000).toString
+        var sessionID = scala.math.round(scala.math.random * 10000000).toString
         var jdbcSocket: java.net.Socket = null
         if (t.isInstanceOf[TSocket]) {
           remoteClient = t.asInstanceOf[TSocket].getSocket()
@@ -164,7 +167,7 @@ object SharkServer extends LogHelper {
   private def execLoadRdds(loadFlag: Boolean, latch:CountDownLatch) {
     if (!loadFlag) {
       latch.countDown
-    } else spawn {
+    } else future {
       while (!server.isServing()) {}
       try {
         val sshandler = new SharkServerHandler
@@ -242,9 +245,16 @@ class GatedSharkServerHandler(latch:CountDownLatch, remoteClient:String,
 
 class SharkServerHandler extends HiveServerHandler with LogHelper {
 
-  private val ss = SessionState.get()
-
-  private val conf: Configuration = if (ss != null) ss.getConf() else new Configuration()
+  private val (sessionState: SessionState, conf: Configuration) = {
+    if (SessionState.get() != null) {
+      (SessionState.get(), SessionState.get().getConf())
+    } else {
+      val newConf = new Configuration()
+      val ss = SessionState.start(newConf.asInstanceOf[HiveConf])
+      setupSessionIO(ss)
+      (ss,newConf)
+    }
+  }
 
   SharkConfVars.initializeWithDefaults(conf)
 
@@ -260,7 +270,7 @@ class SharkServerHandler extends HiveServerHandler with LogHelper {
   private var isSharkQuery = false
 
   override def execute(cmd: String) {
-    SessionState.get()
+    SessionState.start(sessionState)
     val cmd_trimmed = cmd.trim()
     val tokens = cmd_trimmed.split("\\s")
     val cmd_1 = cmd_trimmed.substring(tokens.apply(0).length()).trim()
@@ -275,7 +285,7 @@ class SharkServerHandler extends HiveServerHandler with LogHelper {
       } else {
         isSharkQuery = false
         // Need to reset output for each non-Shark query.
-        setupSessionIO(ss)
+        setupSessionIO(sessionState)
         response = Option(proc.run(cmd_1))
       }
     }

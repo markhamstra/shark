@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # This file is used to launch Shark on the master.
-export SCALA_VERSION=2.9.3
-SHARK_VERSION=0.8.1
+export SCALA_VERSION=2.10
+SHARK_VERSION=0.9.1-SNAPSHOT
 
 # Figure out where the framework is installed
 FWDIR="$(cd `dirname $0`; pwd)"
@@ -38,7 +38,6 @@ if [ ! -f "$HIVE_HOME/lib/hive-exec-$HIVE_VERSION.jar" ] ; then
   exit 1
 fi
 
-
 if [ -n "$MASTER" ] ; then
   if [ -z $SPARK_HOME ] ; then
     echo "No SPARK_HOME specified. Please set SPARK_HOME for cluster mode."
@@ -68,7 +67,7 @@ fi
 
 # Check for optionally specified configuration file path
 if [ "x$HIVE_CONF_DIR" == "x" ] ; then
-    HIVE_CONF_DIR="$HIVE_HOME/conf"
+    HIVE_CONF_DIR="$SHARK_HOME/conf"
 fi
 
 if [ -f "${HIVE_CONF_DIR}/hive-env.sh" ]; then
@@ -192,6 +191,8 @@ if [ "x$RUNNER" == "x" ] ; then
     RUNNER="$SCALA -cp \"$CLASSPATH\""
     EXTRA_ARGS=""
   fi
+  # The JVM doesn't read JAVA_OPTS by default so we need to pass it in
+  EXTRA_ARGS="$JAVA_OPTS"
 fi
 
 exec $RUNNER $EXTRA_ARGS "$@"
