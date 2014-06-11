@@ -115,7 +115,6 @@ object SharkBuild extends Build {
     None
   }).toSeq
 
->>>>>>> 93e8cfef8f54fd25bfdedc566289fe876b63098d
   def coreSettings = Defaults.defaultSettings ++ DependencyGraphPlugin.graphSettings ++ Seq(
 
     name := "shark",
