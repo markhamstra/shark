@@ -38,11 +38,6 @@ export SHARK_MASTER_MEM=1g
 #export SPARK_ASSEMBLY_JAR=
 #export SHARK_ASSEMBLY_JAR=
 
-# Only required if run shark with spark on yarn
-#export SHARK_EXEC_MODE=yarn
-#export SPARK_ASSEMBLY_JAR=
-#export SHARK_ASSEMBLY_JAR=
-
 # (Optional) Extra classpath
 #export SPARK_LIBRARY_PATH=""
 

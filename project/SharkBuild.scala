@@ -29,7 +29,6 @@ import sbtassembly.Plugin.AssemblyKeys._
 object SharkBuild extends Build {
 
   // Shark version
-
   val SHARK_VERSION = "0.9.1"
 
   val SHARK_ORGANIZATION = "edu.berkeley.cs.shark"
@@ -51,14 +50,6 @@ object SharkBuild extends Build {
 
   lazy val hadoopVersion = env("SHARK_HADOOP_VERSION").getOrElse(
     env("SPARK_HADOOP_VERSION").getOrElse(DEFAULT_HADOOP_VERSION))
-
-  lazy val isNewHadoop = scala.util.Properties.envOrNone("SHARK_IS_NEW_HADOOP") match {
-    case None => {
-      val isNewHadoopVersion = "2.[2-9]+".r.findFirstIn(hadoopVersion).isDefined
-      (isNewHadoopVersion|| DEFAULT_IS_NEW_HADOOP)
-    }
-    case Some(v) => v.toBoolean
-  }
 
   // Whether to build Shark with Yarn support
   val YARN_ENABLED = env("SHARK_YARN").getOrElse("false").toBoolean
@@ -124,7 +115,7 @@ object SharkBuild extends Build {
     None
   }).toSeq
 
-
+>>>>>>> 93e8cfef8f54fd25bfdedc566289fe876b63098d
   def coreSettings = Defaults.defaultSettings ++ DependencyGraphPlugin.graphSettings ++ Seq(
 
     name := "shark",

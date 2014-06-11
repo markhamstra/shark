@@ -52,8 +52,5 @@ test_warehouses
 # Ensime files for emacs
 .ensime
 .ensime_lucene
-
-# This is copied by Hive to the project directory (should be fixed)
-hive-builtins-*.jar
 /eclipse_bin
 /.scala_dependencies

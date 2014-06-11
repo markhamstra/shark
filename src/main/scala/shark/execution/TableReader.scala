@@ -118,7 +118,7 @@ class OffHeapTableReader(@transient _tableDesc: TableDesc, _storageClient: OffHe
       new EmptyRDD[Object](SharkEnv.sc)
     }
   }
-
+>>>>>>> 93e8cfef8f54fd25bfdedc566289fe876b63098d
 }
 
 

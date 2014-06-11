@@ -185,6 +185,7 @@ object ASTRewriteUtil extends LogHelper {
           val selectStmt = destinationAndSelectStmt.get(1)
           val selectExprs = getChildren(selectStmt)
           // With respect to the select node's children list, find the index to the TOK_SELEXPR root
+          // for the subtree that contains the TOK_FUNCTIONDI parent of the distinct aggregate node.
           val distinctFunctionIndices = findIndicesForNodeTokenType(selectExprs,
             HiveParser.TOK_FUNCTIONDI)
           val functionIndices = findIndicesForNodeTokenType(selectExprs,
